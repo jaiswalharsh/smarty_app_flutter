@@ -1,0 +1,6 @@
+# Podfile (in ios/ folder of your Flutter project)
+target 'Runner' do
+  use_frameworks!  # Make sure frameworks are enabled
+  pod 'ESPProvision', '~> 3.0.3'  # Replace x.x.x with the version you need
+end
+
