@@ -42,4 +42,17 @@
             <data android:mimeType="text/plain"/>
         </intent>
     </queries>
+
+    <!-- Bluetooth permissions -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Location permissions (required for BLE scanning and Wi-Fi scanning on Android) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Feature declaration for Bluetooth -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 </manifest>
