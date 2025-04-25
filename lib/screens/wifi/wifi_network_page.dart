@@ -26,7 +26,6 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   
   // Map to store chunks of WiFi scan data
   final Map<int, String> _wifiScanChunks = {};
-  int _totalWifiScanChunks = 0;
 
   @override
   void initState() {
@@ -41,8 +40,10 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
       _wifiNetworks = [];
       _statusMessage = 'Scanning for WiFi networks...';
       _wifiScanChunks.clear();
-      _totalWifiScanChunks = 0;
     });
+
+    // Add a delay for any in-progress WiFi operations to complete
+    await Future.delayed(Duration(milliseconds: 500));
 
     try {
       // Find the WiFi scan characteristic
@@ -50,68 +51,119 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
           BleService.findCharacteristic(widget.service, "ab01");
 
       if (wifiScanCharacteristic != null) {
+        // Reset notification state first to ensure clean start
+        try {
+          await wifiScanCharacteristic.setNotifyValue(false);
+          await Future.delayed(Duration(milliseconds: 300));
+        } catch (e) {
+          print("⚠️ Error resetting notifications: $e");
+        }
+        
         // Set up notification for the characteristic to receive chunks
-        print("🔄 Setting up notification listener for WiFi scan characteristic");
+        // print("🔄 Setting up notification listener for WiFi scan characteristic");
         
         // Enable notifications
         await wifiScanCharacteristic.setNotifyValue(true);
-        print("✅ Notifications enabled for WiFi scan characteristic");
+        // print("✅ Notifications enabled for WiFi scan characteristic");
+        
+        // Store all received notifications
+        List<String> notifications = [];
+        bool receivedTotalMarker = false;
+        bool receivedEndMarker = false;
+        int expectedNetworks = 0;
+        int retryCount = 0;
         
         // Listen for notifications using the value stream
         StreamSubscription<List<int>>? subscription;
         
         subscription = wifiScanCharacteristic.lastValueStream.listen((value) {
           if (value.isEmpty) {
-            print("⚠️ Received empty notification data");
+            // print("⚠️ Received empty notification data");
             return;
           }
           
-          String chunkData = String.fromCharCodes(value);
-          print("📶 Received chunk data (${value.length} bytes): $chunkData");
+          String notification = String.fromCharCodes(value);
+          // print("📶 Received notification: $notification");
           
-          // Parse the chunk format: [chunk_index]/[total_chunks]:[data]
-          if (chunkData.contains('/') && chunkData.contains(':')) {
-            int separatorIndex = chunkData.indexOf(':');
-            String header = chunkData.substring(0, separatorIndex);
-            String data = chunkData.substring(separatorIndex + 1);
-            
-            List<String> headerParts = header.split('/');
-            if (headerParts.length == 2) {
-              int chunkIndex = int.tryParse(headerParts[0]) ?? 0;
-              int totalChunks = int.tryParse(headerParts[1]) ?? 0;
-              
-              if (chunkIndex > 0 && totalChunks > 0) {
-                print("📶 Received chunk $chunkIndex of $totalChunks");
-                _wifiScanChunks[chunkIndex] = data;
-                _totalWifiScanChunks = totalChunks;
-                
-                // Check if we have all chunks
-                if (_wifiScanChunks.length == _totalWifiScanChunks) {
-                  // Combine all chunks in order
-                  String completeData = '';
-                  for (int i = 1; i <= _totalWifiScanChunks; i++) {
-                    completeData += _wifiScanChunks[i] ?? '';
-                  }
-                  
-                  print("📶 Complete WiFi scan data: $completeData");
-                  _processWifiScanData(completeData);
-                  
-                  // Cancel the subscription
-                  subscription?.cancel();
-                }
-              }
+          // Check if this is the TOTAL marker
+          if (notification.startsWith("TOTAL:")) {
+            try {
+              receivedTotalMarker = true;
+              expectedNetworks = int.parse(notification.substring(6));
+              print("📶 Expecting $expectedNetworks networks");
+            } catch (e) {
+              print("❌ Error parsing TOTAL marker: $e");
             }
-          } else {
-            // Handle non-chunked data (single response)
-            print("📶 Received non-chunked data: $chunkData");
-            _processWifiScanData(chunkData);
+            return;
+          }
+          
+          // Check if this is the END marker
+          if (notification == "END") {
+            receivedEndMarker = true;
+            print("📶 Received END marker, WiFi scan complete");
+            
+            // Wait a short time to make sure we've received all notifications
+            Future.delayed(Duration(milliseconds: 300), () {
+              // Process all collected notifications
+              if (notifications.isNotEmpty) {
+                print("📶 Processing ${notifications.length} network notifications");
+                _processWifiScanData(notifications.join('\n'));
+              } else if (retryCount < 1) {
+                // Try one more time to trigger scan by reading the characteristic
+                print("⚠️ Received END marker but no network data, retrying scan...");
+                retryCount++;
+                
+                // Wait a bit and try reading again to trigger results
+                Future.delayed(Duration(milliseconds: 500), () async {
+                  try {
+                    await wifiScanCharacteristic.read();
+                    print("📡 Retry read completed");
+                  } catch (e) {
+                    print("⚠️ Error on retry read: $e");
+                    
+                    // Show empty networks if retry fails
+                    setState(() {
+                      _isScanningWifi = false;
+                      _statusMessage = 'No WiFi networks found';
+                    });
+                  }
+                });
+              } else {
+                print("⚠️ Received END marker but no network data after retry");
+                setState(() {
+                  _isScanningWifi = false;
+                  _statusMessage = 'No WiFi networks found';
+                });
+                
+                // Cancel the subscription
+                subscription?.cancel();
+              }
+            });
+            return;
+          }
+          
+          // Add this notification to our list
+          notifications.add(notification);
+          
+          // For the new format, a single notification may contain multiple networks separated by newlines
+          // if (notification.contains('\n')) {
+          //   print("📶 Detected chunked notification with multiple networks");
+          //   List<String> chunks = notification.split('\n');
+          //   print("📶 Found ${chunks.length} networks in single notification");
+          // }
+          
+          // If we've received all expected networks and the END marker
+          if (receivedTotalMarker && receivedEndMarker && 
+              expectedNetworks > 0 && notifications.length >= expectedNetworks) {
+            print("📶 Received all expected networks and END marker");
+            _processWifiScanData(notifications.join('\n'));
             subscription?.cancel();
           }
         });
         
         // Check if the characteristic supports write
         bool supportsWrite = wifiScanCharacteristic.properties.write || 
-                            wifiScanCharacteristic.properties.writeWithoutResponse;
+                           wifiScanCharacteristic.properties.writeWithoutResponse;
         
         if (supportsWrite) {
           // Write to the characteristic to trigger a WiFi scan on the ESP32
@@ -120,7 +172,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
             List<int> triggerValue = utf8.encode("SCAN");
             await wifiScanCharacteristic.write(triggerValue, 
                 withoutResponse: wifiScanCharacteristic.properties.writeWithoutResponse);
-            print("📡 Scan trigger sent successfully");
+            // print("📡 Scan trigger sent successfully");
           } catch (e) {
             print("⚠️ Could not write to trigger scan: $e");
             print("⚠️ Falling back to read-only mode");
@@ -131,6 +183,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         
         // Read the characteristic to start receiving notifications
         try {
+          // print("📡 Reading to trigger scan notifications...");
           await wifiScanCharacteristic.read();
           print("📡 Initial read completed");
         } catch (e) {
@@ -138,33 +191,40 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         }
         
         // Set a timeout to cancel the subscription if we don't receive all chunks
-        Future.delayed(Duration(seconds: 10), () {
+        Future.delayed(Duration(seconds: 15), () {
           if (_isScanningWifi) {
+            // print("⏱️ Timeout reached, checking collected notifications");
             subscription?.cancel();
             
-            // Process whatever chunks we have if we got at least one
-            if (_wifiScanChunks.isNotEmpty) {
-              String partialData = '';
-              for (int i = 1; i <= _totalWifiScanChunks; i++) {
-                if (_wifiScanChunks.containsKey(i)) {
-                  partialData += _wifiScanChunks[i] ?? '';
-                }
-              }
+            // Process whatever notifications we have if any
+            if (notifications.isNotEmpty) {
+              print("⏱️ Processing ${notifications.length} notifications after timeout");
+              _processWifiScanData(notifications.join('\n'));
+            } else {
+              // print("⏱️ No networks received after timeout");
               
-              if (partialData.isNotEmpty) {
-                print("📶 Processing partial WiFi scan data: $partialData");
-                _processWifiScanData(partialData);
-              } else {
+              // Try one more read before giving up
+              try {
+                wifiScanCharacteristic.read().then((_) {
+                  // print("📡 Final attempt read completed");
+                  
+                  // Give a short time for notifications to arrive
+                  Future.delayed(Duration(milliseconds: 500), () {
+                    if (notifications.isEmpty) {
+                      setState(() {
+                        _isScanningWifi = false;
+                        _statusMessage = 'Failed to receive WiFi scan data.';
+                      });
+                    }
+                  });
+                });
+              } catch (e) {
+                print("⚠️ Error on final read attempt: $e");
                 setState(() {
                   _isScanningWifi = false;
                   _statusMessage = 'Failed to receive WiFi scan data.';
                 });
               }
-            } else {
-              setState(() {
-                _isScanningWifi = false;
-                _statusMessage = 'Failed to receive WiFi scan data.';
-              });
             }
           }
         });
@@ -191,12 +251,58 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   
   // Process the WiFi scan data
   void _processWifiScanData(String wifiString) {
-    List<String> networks = WifiUtils.processWifiScanData(wifiString);
+    // print("📶 WifiNetworkPage: Processing scan data: $wifiString");
     
+    // Pre-process the data to handle chunked format
+    // Split by newlines and process each line
+    List<String> lines = wifiString.split('\n');
+    // print("📶 WifiNetworkPage: Split data into ${lines.length} lines");
+    
+    // Filter out lines that don't represent networks
+    lines = lines.where((line) => 
+      line.trim().isNotEmpty && 
+      !line.startsWith("TOTAL:") && 
+      line != "END"
+    ).toList();
+    
+    // print("📶 WifiNetworkPage: After filtering, ${lines.length} potential network lines");
+    
+    List<String> networks = WifiUtils.processWifiScanData(lines.join('\n'));
+    
+    print("📶 WifiNetworkPage: Found ${networks.length} networks");
+    
+    // Only update UI if we have networks or we need to show empty state
     setState(() {
       _wifiNetworks = networks;
       _isScanningWifi = false;
-      _statusMessage = 'Found ${_wifiNetworks.length} WiFi networks';
+      
+      if (networks.isEmpty) {
+        // Try to manually extract network names if processWifiScanData failed
+        List<String> manualNetworks = [];
+        
+        for (String line in lines) {
+          if (line.contains(':')) {
+            try {
+              final parts = line.split(':');
+              if (parts.length >= 2 && parts[1].trim().isNotEmpty) {
+                manualNetworks.add(parts[1].trim());
+              }
+            } catch (e) {
+              print("📶 Error parsing line manually: $e");
+            }
+          }
+        }
+        
+        if (manualNetworks.isNotEmpty) {
+          print("📶 WifiNetworkPage: Found ${manualNetworks.length} networks with manual parsing");
+          _wifiNetworks = manualNetworks.toSet().toList()..sort();
+          _statusMessage = 'Found ${_wifiNetworks.length} WiFi networks';
+        } else {
+          _statusMessage = 'No WiFi networks found';
+        }
+      } else {
+        _statusMessage = 'Found ${_wifiNetworks.length} WiFi networks';
+      }
     });
   }
 

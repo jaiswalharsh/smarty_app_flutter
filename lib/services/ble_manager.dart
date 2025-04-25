@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../utils/wifi_utils.dart';
 import 'ble_service.dart';
@@ -29,16 +28,16 @@ class BleManager {
   BluetoothCharacteristic? _wifiScanCharacteristic;
   BluetoothCharacteristic? _wifiCredsCharacteristic;
   BluetoothCharacteristic? _userDataCharacteristic;
+  // BluetoothCharacteristic? _statusUpdateCharacteristic;
 
   // Status information
   String _connectedWifi = "Unknown";
-  String _batteryLevel = "Unknown";
+  int _batteryLevel = 0;
   String _wifiStatusMessage = "";
-  String _lastWifiStatus = "Unknown";
 
   // Stream controllers for status updates
   final _wifiStatusController = StreamController<String>.broadcast();
-  final _batteryStatusController = StreamController<String>.broadcast();
+  final _batteryStatusController = StreamController<int>.broadcast();
   final _wifiStatusMessageController = StreamController<String>.broadcast();
   final _showSnackBarController = StreamController<String>.broadcast();
 
@@ -46,18 +45,24 @@ class BleManager {
   BluetoothDevice? get connectedDevice => _connectedDevice;
   BluetoothService? get smartyService => _smartyService;
   String get connectedWifi => _connectedWifi;
-  String get batteryLevel => _batteryLevel;
+  int get batteryLevel => _batteryLevel;
   String get wifiStatusMessage => _wifiStatusMessage;
   Stream<String> get wifiStatusStream => _wifiStatusController.stream;
-  Stream<String> get batteryStatusStream => _batteryStatusController.stream;
+  Stream<int> get batteryStatusStream => _batteryStatusController.stream;
   Stream<String> get wifiStatusMessageStream =>
       _wifiStatusMessageController.stream;
   Stream<String> get showSnackBarStream => _showSnackBarController.stream;
   bool get isConnected => _connectedDevice != null;
   bool get isWifiConnected =>
-      _connectedWifi != "Unknown" &&
-      _connectedWifi != "Reset" &&
-      _connectedWifi != "NotConnected" &&
+      _connectedWifi.trim().isNotEmpty &&
+      _connectedWifi != "Init" &&
+      _connectedWifi != "Initializing" &&
+      _connectedWifi != "Auth Failed" &&
+      _connectedWifi != "AuthFailed" &&
+      _connectedWifi != "Reset Failed" &&
+      _connectedWifi != "No credentials" &&
+      _connectedWifi != "Connection Failed" &&
+      _connectedWifi != "Reconnecting" &&
       !_connectedWifi.contains("Failed");
 
   // Initialize the manager with a connected device
@@ -68,6 +73,7 @@ class BleManager {
     }
 
     _connectedDevice = device;
+    print("🔄 BleManager: Initializing with device: ${device.platformName}");
 
     // Discover services
     await _discoverServices();
@@ -76,6 +82,53 @@ class BleManager {
     if (_statusCharacteristic != null) {
       _setupStatusUpdates();
     }
+    
+    // Set up connection state monitoring
+    _monitorDeviceConnection();
+  }
+
+  // Monitor device connection state
+  void _monitorDeviceConnection() {
+    if (_connectedDevice == null) return;
+    
+    // print("🔄 Setting up device connection monitoring");
+    
+    _connectedDevice!.connectionState.listen((BluetoothConnectionState state) {
+      print("💡 Device connection state changed: $state");
+      
+      if (state == BluetoothConnectionState.connected) {
+        // When connected, ensure notifications are set up
+        if (_statusCharacteristic != null) {
+          _setupNotificationsIfNeeded().then((success) {
+            if (success) {
+              // print("✅ Connection established, notifications set up");
+            }
+          });
+        }
+      } else if (state == BluetoothConnectionState.disconnected) {
+        print("❌ Device disconnected from BLE manager");
+        
+        // Reset the device and service references
+        _resetConnectionState();
+        
+        // Notify listeners about the disconnection
+        _wifiStatusController.add("NotConnected");
+        _wifiStatusMessageController.add("Device disconnected");
+        _showSnackBarController.add("Device disconnected");
+      }
+    });
+  }
+  
+  // Reset the connection state when device is disconnected
+  void _resetConnectionState() {
+    _smartyService = null;
+    _statusCharacteristic = null;
+    _wifiScanCharacteristic = null;
+    _wifiCredsCharacteristic = null;
+    _userDataCharacteristic = null;
+    // _statusUpdateCharacteristic = null;
+    _connectedWifi = "NotConnected";
+    _connectedDevice = null;
   }
 
   // Discover services and cache characteristics
@@ -88,7 +141,7 @@ class BleManager {
       _smartyService = BleService.findSmartyService(services);
 
       if (_smartyService != null) {
-        print("✅ BleManager: Found Smarty service: ${_smartyService!.uuid}");
+        // print("✅ BleManager: Found Smarty service: ${_smartyService!.uuid}");
 
         // Cache characteristics
         _statusCharacteristic = BleService.findCharacteristic(
@@ -107,20 +160,27 @@ class BleManager {
           _smartyService!,
           "ab03",
         );
+        // _statusUpdateCharacteristic = BleService.findCharacteristic(
+        //   _smartyService!,
+        //   BleService.statusUpdateUuid,
+        // );
 
-        print("✅ BleManager: Cached characteristics:");
-        print(
-          "  - Status: ${_statusCharacteristic != null ? 'Found' : 'Not found'}",
-        );
-        print(
-          "  - WiFi Scan: ${_wifiScanCharacteristic != null ? 'Found' : 'Not found'}",
-        );
-        print(
-          "  - WiFi Creds: ${_wifiCredsCharacteristic != null ? 'Found' : 'Not found'}",
-        );
-        print(
-          "  - User Data: ${_userDataCharacteristic != null ? 'Found' : 'Not found'}",
-        );
+        // print("✅ BleManager: Cached characteristics:");
+        // print(
+        //   "  - Status: ${_statusCharacteristic != null ? 'Found' : 'Not found'}",
+        // );
+        // print(
+        //   "  - WiFi Scan: ${_wifiScanCharacteristic != null ? 'Found' : 'Not found'}",
+        // );
+        // print(
+        //   "  - WiFi Creds: ${_wifiCredsCharacteristic != null ? 'Found' : 'Not found'}",
+        // );
+        // print(
+        //   "  - User Data: ${_userDataCharacteristic != null ? 'Found' : 'Not found'}",
+        // );
+        // print(
+        //   "  - Status Update: ${_statusUpdateCharacteristic != null ? 'Found' : 'Not found'}",
+        // );
       }
     } catch (e) {
       print("❌ BleManager: Error discovering services: $e");
@@ -133,7 +193,11 @@ class BleManager {
 
     try {
       // Enable notifications
-      _statusCharacteristic!.setNotifyValue(true);
+      _statusCharacteristic!.setNotifyValue(true).then((_) {
+        // print("✅ BleManager: Status notifications enabled");
+      }).catchError((e) {
+        print("❌ BleManager: Error enabling status notifications: $e");
+      });
 
       // Variables for debouncing
       String lastStatusString = "";
@@ -141,7 +205,10 @@ class BleManager {
 
       // Listen for notifications
       _statusCharacteristic!.lastValueStream.listen((value) {
-        if (value.isEmpty) return;
+        if (value.isEmpty) {
+          // print("⚠️ BleManager: Received empty status notification");
+          return;
+        }
 
         String statusString = String.fromCharCodes(value);
 
@@ -155,172 +222,221 @@ class BleManager {
         lastStatusString = statusString;
         lastUpdateTime = DateTime.now();
 
-        print("📊 BleManager: Status update: $statusString");
+        print("📊 BleManager: Status notification received: $statusString");
 
-        // Parse the status string
-        Map<String, String> statusValues = WifiUtils.parseStatusUpdate(
-          statusString,
-        );
-
-        // Update status values
-        if (statusValues.containsKey('WIFI')) {
-          String newWifiStatus = statusValues['WIFI']!;
-
-          // Only process if the status has changed
-          if (newWifiStatus != _lastWifiStatus) {
-            _lastWifiStatus = newWifiStatus;
-            _connectedWifi = newWifiStatus;
-            _wifiStatusController.add(_connectedWifi);
-
-            // Set appropriate status message based on WiFi status
-            switch (_connectedWifi) {
-              case "Unknown":
-                _wifiStatusMessage =
-                    "Failed to fetch WiFi status. Please try again.";
-                _showSnackBarController.add("WiFi status unknown");
-                break;
-              case "Reset":
-                _wifiStatusMessage =
-                    "WiFi reset successful. Ready to connect to a new network.";
-                _showSnackBarController.add("WiFi reset successful");
-                break;
-              case "NotConnected":
-                _wifiStatusMessage = "Not connected to any WiFi network.";
-                _showSnackBarController.add("WiFi not connected");
-                break;
-              case "Connection Failed":
-                _wifiStatusMessage =
-                    "Failed to connect to WiFi. Please try again.";
-                _showSnackBarController.add("WiFi connection failed");
-                break;
-              case "Reset Failed":
-                _wifiStatusMessage = "Failed to reset WiFi. Please try again.";
-                _showSnackBarController.add("WiFi reset failed");
-                break;
-              default:
-                if (_connectedWifi.contains("Failed")) {
-                  _wifiStatusMessage =
-                      "WiFi connection failed. Please try again.";
-                  _showSnackBarController.add("WiFi connection failed");
-                } else {
-                  _wifiStatusMessage = "Connected to $_connectedWifi";
-                  _showSnackBarController.add("Connected to $_connectedWifi");
-                }
-            }
-
-            // Send the status message
-            _wifiStatusMessageController.add(_wifiStatusMessage);
-          }
-        }
-
-        if (statusValues.containsKey('BAT')) {
-          _batteryLevel = statusValues['BAT']!;
-          _batteryStatusController.add(_batteryLevel);
-        }
+        // Process status data
+        _processStatusData(value);
       });
 
-      // Read initial status
-      _readStatusUpdate();
+      // Schedule an initial read after a small delay to allow notifications to be set up
+      Future.delayed(Duration(milliseconds: 500), () {
+        readStatusUpdate();
+      });
     } catch (e) {
       print("❌ BleManager: Error setting up status updates: $e");
     }
   }
 
-  // Read status update (public method)
+  // Read status update from the device
   Future<void> readStatusUpdate() async {
-    return _readStatusUpdate();
-  }
-  
-  // Read status update (private implementation)
-  Future<void> _readStatusUpdate() async {
-    if (_statusCharacteristic == null) return;
-
+    if (_statusCharacteristic == null) {
+      print("⚠️ BleManager: Status characteristic not available");
+      return;
+    }
+    
     try {
-      List<int> value = await _statusCharacteristic!.read();
-      String statusString = String.fromCharCodes(value);
-
-      // If empty, try again
-      if (statusString.isEmpty) {
-        await Future.delayed(Duration(milliseconds: 500));
-        value = await _statusCharacteristic!.read();
-        statusString = String.fromCharCodes(value);
-      }
-
-      if (statusString.isNotEmpty) {
-        Map<String, String> statusValues = WifiUtils.parseStatusUpdate(
-          statusString,
-        );
-
-        if (statusValues.containsKey('WIFI')) {
-          String newWifiStatus = statusValues['WIFI']!;
-
-          // Only process if the status has changed
-          if (newWifiStatus != _lastWifiStatus) {
-            _lastWifiStatus = newWifiStatus;
-            _connectedWifi = newWifiStatus;
-            _wifiStatusController.add(_connectedWifi);
-
-            // Set appropriate status message based on WiFi status
-            switch (_connectedWifi) {
-              case "Unknown":
-                _wifiStatusMessage =
-                    "Failed to fetch WiFi status. Please try again.";
-                _showSnackBarController.add("WiFi status unknown");
-                break;
-              case "Reset":
-                _wifiStatusMessage =
-                    "WiFi reset successful. Ready to connect to a new network.";
-                _showSnackBarController.add("WiFi reset successful");
-                break;
-              case "NotConnected":
-                _wifiStatusMessage = "Not connected to any WiFi network.";
-                _showSnackBarController.add("WiFi not connected");
-                break;
-              case "Connection Failed":
-                _wifiStatusMessage =
-                    "Failed to connect to WiFi. Please try again.";
-                _showSnackBarController.add("WiFi connection failed");
-                break;
-              case "Reset Failed":
-                _wifiStatusMessage = "Failed to reset WiFi. Please try again.";
-                _showSnackBarController.add("WiFi reset failed");
-                break;
-              default:
-                if (_connectedWifi.contains("Failed")) {
-                  _wifiStatusMessage =
-                      "WiFi connection failed. Please try again.";
-                  _showSnackBarController.add("WiFi connection failed");
-                } else {
-                  _wifiStatusMessage = "Connected to $_connectedWifi";
-                  _showSnackBarController.add("Connected to $_connectedWifi");
-                }
-            }
-
-            // Send the status message
-            _wifiStatusMessageController.add(_wifiStatusMessage);
+      print("📡 BleManager: Reading status update...");
+      
+      // Set up notifications if needed
+      await _setupNotificationsIfNeeded();
+      
+      // Read the characteristic value
+      List<int> data = await _statusCharacteristic!.read();
+      
+      if (data.isEmpty) {
+        // print("⚠️ BleManager: Status update empty, retrying...");
+        
+        // Wait a bit and try again
+        await Future.delayed(Duration(milliseconds: 300));
+        data = await _statusCharacteristic!.read();
+        
+        if (data.isEmpty) {
+          // print("⚠️ BleManager: Status update still empty, retrying again...");
+          
+          // Try one more time
+          await Future.delayed(Duration(milliseconds: 500));
+          data = await _statusCharacteristic!.read();
+          
+          if (data.isEmpty) {
+            print("⚠️ BleManager: Status update still empty after retries");
+            return;
           }
         }
-
-        if (statusValues.containsKey('BAT')) {
-          _batteryLevel = statusValues['BAT']!;
-          _batteryStatusController.add(_batteryLevel);
-        }
       }
+      
+      // Process the data
+      await _processStatusData(data);
+      
     } catch (e) {
       print("❌ BleManager: Error reading status update: $e");
     }
   }
+  
+  // Helper method to set up notifications if not already set up
+  Future<bool> _setupNotificationsIfNeeded() async {
+    if (_statusCharacteristic == null) return false;
+    
+    try {
+      // Check if notifications are already set up
+      if (!_statusCharacteristic!.isNotifying) {
+        // Enable notifications
+        await _statusCharacteristic!.setNotifyValue(true);
+        // print("✅ BleManager: Status notifications set up");
+      }
+      return true;
+    } catch (e) {
+      print("❌ BleManager: Error setting up status notifications: $e");
+      return false;
+    }
+  }
+  
+  // Helper method to process status data
+  Future<void> _processStatusData(List<int> data) async {
+    if (data.isEmpty) return;
+    
+    String statusString = String.fromCharCodes(data);
+    print("📱 BleManager: Received status update: $statusString");
+    
+    // Try to parse as JSON first
+    if (statusString.trim().startsWith('{')) {
+      try {
+        Map<String, dynamic> jsonData = jsonDecode(statusString);
+        
+        // Extract WiFi status
+        if (jsonData.containsKey('wifi')) {
+          String wifiName = jsonData['wifi'].toString();
+          _connectedWifi = wifiName;
+          _wifiStatusController.add(wifiName);
+          
+          // Notify with formatted message
+          String message = WifiUtils.getWifiStatusMessage(wifiName);
+          _wifiStatusMessageController.add(message);
+        }
+        
+        // Extract battery level
+        if (jsonData.containsKey('battery')) {
+          try {
+            // Handle battery value properly based on its type
+            var batteryValue = jsonData['battery'];
+            if (batteryValue is int) {
+              _batteryLevel = batteryValue;
+            } else if (batteryValue is double) {
+              _batteryLevel = batteryValue.toInt();
+            } else {
+              // Remove any non-numeric characters if it's a string
+              String batteryString = batteryValue.toString().replaceAll(RegExp(r'[^0-9]'), '');
+              if (batteryString.isNotEmpty) {
+                _batteryLevel = int.parse(batteryString);
+              }
+            }
+            _batteryStatusController.add(_batteryLevel);
+          } catch (e) {
+            print("⚠️ BleManager: Failed to parse battery level: $e");
+          }
+        }
+        
+        return;
+      } catch (e) {
+        print("⚠️ BleManager: Failed to parse JSON: $e, falling back to string parsing");
+        // Fall through to legacy string parsing
+      }
+    }
+    
+    // Legacy string parsing for older firmware (key-value format or simple format)
+    if (statusString.contains("WIFI:") || statusString.contains("BAT:")) {
+      // Handle key-value format
+      Map<String, String> statusValues = {};
+      List<String> parts = statusString.split(',');
+      
+      for (String part in parts) {
+        List<String> keyValue = part.split(':');
+        if (keyValue.length == 2) {
+          String key = keyValue[0].trim();
+          String value = keyValue[1].trim();
+          statusValues[key] = value;
+        }
+      }
+      
+      // Update WiFi status
+      if (statusValues.containsKey('WIFI')) {
+        String wifiName = statusValues['WIFI']!;
+        _connectedWifi = wifiName;
+        _wifiStatusController.add(wifiName);
+        
+        // Notify with formatted message
+        String message = WifiUtils.getWifiStatusMessage(wifiName);
+        _wifiStatusMessageController.add(message);
+      }
+      
+      // Update battery level
+      if (statusValues.containsKey('BAT')) {
+        try {
+          String batteryString = statusValues['BAT']!.replaceAll(RegExp(r'[^0-9]'), '');
+          if (batteryString.isNotEmpty) {
+            _batteryLevel = int.parse(batteryString);
+            _batteryStatusController.add(_batteryLevel);
+          }
+        } catch (e) {
+          print("⚠️ BleManager: Failed to parse battery level: $e");
+        }
+      }
+    } else {
+      // Handle simple format (status,level)
+      List<String> statusParts = statusString.split(',');
+      if (statusParts.length >= 1) {
+        // First part is WiFi name
+        String wifiName = statusParts[0];
+        _connectedWifi = wifiName;
+        
+        // Second part is battery level (if present)
+        if (statusParts.length >= 2) {
+          try {
+            if (statusParts[1].isNotEmpty) {
+              int batteryValue = int.parse(statusParts[1]);
+              _batteryLevel = batteryValue;
+            }
+          } catch (e) {
+            print("⚠️ BleManager: Failed to parse battery level: $e");
+          }
+        }
+        
+        // Notify listeners of status changes
+        _wifiStatusController.add(wifiName);
+        _batteryStatusController.add(_batteryLevel);
+        
+        // Notify with formatted message
+        String message = WifiUtils.getWifiStatusMessage(wifiName);
+        _wifiStatusMessageController.add(message);
+      } else {
+        print("⚠️ BleManager: Status update format invalid: $statusString");
+      }
+    }
+  }
 
   // Send user data
-  Future<bool> sendUserData(String name, String age, String hobby) async {
+  Future<bool> sendUserData(String name, String age, String hobby, {String avatar = ''}) async {
     if (_userDataCharacteristic == null) {
       print("❌ BleManager: User data characteristic not found");
       return false;
     }
 
     try {
-      // Format the user data
-      String userData = "NAME:$name,AGE:$age,HOBBY:$hobby";
+      // Format the user data, include avatar if provided
+      String userData = avatar.isEmpty
+          ? "NAME:$name,AGE:$age,HOBBY:$hobby"
+          : "NAME:$name,AGE:$age,HOBBY:$hobby,AVATAR:$avatar";
+          
+      // print("📤 Sending user data: $userData");
       List<int> value = utf8.encode(userData);
 
       // Check if the characteristic supports write without response
@@ -377,6 +493,12 @@ class BleManager {
       return false;
     }
   }
+  
+  // Forget WiFi network - alias for resetWifiConnection with clearer naming
+  Future<bool> forgetWifi() async {
+    // print("📶 BleManager: Forgetting WiFi network");
+    return resetWifiConnection();
+  }
 
   // Scan for WiFi networks
   Future<List<String>> scanWifiNetworks() async {
@@ -388,9 +510,10 @@ class BleManager {
     try {
       // Set up a completer to wait for scan results
       Completer<List<String>> completer = Completer<List<String>>();
-      Map<int, String> chunks = {};
-      int totalChunks = 0;
-
+      List<String> networkEntries = [];
+      bool receivedEndMarker = false;
+      int expectedNetworks = 0;
+      
       // Enable notifications
       await _wifiScanCharacteristic!.setNotifyValue(true);
 
@@ -399,57 +522,47 @@ class BleManager {
       subscription = _wifiScanCharacteristic!.lastValueStream.listen((value) {
         if (value.isEmpty) return;
 
-        String chunkData = String.fromCharCodes(value);
-
-        // Parse the chunk format
-        if (chunkData.contains('/') && chunkData.contains(':')) {
-          int separatorIndex = chunkData.indexOf(':');
-          String header = chunkData.substring(0, separatorIndex);
-          String data = chunkData.substring(separatorIndex + 1);
-
-          List<String> headerParts = header.split('/');
-          if (headerParts.length == 2) {
-            int chunkIndex = int.tryParse(headerParts[0]) ?? 0;
-            int totalChunksCount = int.tryParse(headerParts[1]) ?? 0;
-
-            if (chunkIndex > 0 && totalChunksCount > 0) {
-              chunks[chunkIndex] = data;
-              totalChunks = totalChunksCount;
-
-              // Check if we have all chunks
-              if (chunks.length == totalChunks) {
-                // Combine all chunks
-                String completeData = '';
-                for (int i = 1; i <= totalChunks; i++) {
-                  completeData += chunks[i] ?? '';
-                }
-
-                // Process the data
-                List<String> networks = WifiUtils.processWifiScanData(
-                  completeData,
-                );
-
-                // Complete the future
-                if (!completer.isCompleted) {
-                  completer.complete(networks);
-                }
-
-                // Cancel the subscription
-                subscription?.cancel();
-              }
-            }
+        String notification = String.fromCharCodes(value);
+        // print("📶 BleManager: Received WiFi scan notification: $notification");
+        
+        // Check for TOTAL marker which indicates how many networks to expect
+        if (notification.startsWith("TOTAL:")) {
+          try {
+            expectedNetworks = int.parse(notification.substring(6));
+            print("📶 BleManager: Expecting $expectedNetworks networks");
+          } catch (e) {
+            print("❌ BleManager: Error parsing TOTAL count: $e");
           }
-        } else {
-          // Handle non-chunked data
-          List<String> networks = WifiUtils.processWifiScanData(chunkData);
-
-          // Complete the future
+          return;
+        }
+        
+        // Check for END marker
+        if (notification == "END") {
+          receivedEndMarker = true;
+          print("📶 BleManager: Received END marker, scan complete");
+          
+          // Complete the future with all collected networks
           if (!completer.isCompleted) {
+            // Process all collected entries
+            List<String> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
             completer.complete(networks);
+            subscription?.cancel();
           }
-
-          // Cancel the subscription
-          subscription?.cancel();
+          return;
+        }
+        
+        // Add the notification to our list of entries
+        networkEntries.add(notification);
+        
+        // If we have received all expected networks and an END marker, or if we have more than expected
+        if ((expectedNetworks > 0 && networkEntries.length >= expectedNetworks && receivedEndMarker) || 
+            (expectedNetworks > 0 && networkEntries.length > expectedNetworks + 5)) {
+          if (!completer.isCompleted) {
+            // print("📶 BleManager: Received all expected networks or more than expected");
+            List<String> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
+            completer.complete(networks);
+            subscription?.cancel();
+          }
         }
       });
 
@@ -465,35 +578,24 @@ class BleManager {
           withoutResponse:
               _wifiScanCharacteristic!.properties.writeWithoutResponse,
         );
+        // print("📶 BleManager: Sent SCAN command to trigger WiFi scan");
       }
 
       // Read the characteristic to start receiving notifications
       await _wifiScanCharacteristic!.read();
+      // print("📶 BleManager: Initial read completed to start notifications");
 
       // Set a timeout
-      Timer(Duration(seconds: 10), () {
+      Timer(Duration(seconds: 15), () {
         if (!completer.isCompleted) {
-          if (chunks.isNotEmpty) {
-            // Process whatever chunks we have
-            String partialData = '';
-            for (int i = 1; i <= totalChunks; i++) {
-              if (chunks.containsKey(i)) {
-                partialData += chunks[i] ?? '';
-              }
-            }
-
-            if (partialData.isNotEmpty) {
-              List<String> networks = WifiUtils.processWifiScanData(
-                partialData,
-              );
-              completer.complete(networks);
-            } else {
-              completer.complete([]);
-            }
+          print("⏱️ BleManager: WiFi scan timeout reached");
+          if (networkEntries.isNotEmpty) {
+            // Process whatever entries we have received
+            List<String> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
+            completer.complete(networks);
           } else {
             completer.complete([]);
           }
-
           subscription?.cancel();
         }
       });
@@ -505,8 +607,94 @@ class BleManager {
     }
   }
 
+  // Restore connection after hot restart
+  Future<bool> restoreConnectionsAfterHotRestart() async {
+    try {
+      // Get connected devices from BLE service
+      List<BluetoothDevice> devices = await BleService.getConnectedDevices();
+      
+      if (devices.isNotEmpty) {
+        // Use the first found device
+        BluetoothDevice device = devices.first;
+        print("✅ BleManager: Restoring connection to ${device.platformName}");
+        
+        // Initialize with the device
+        await initialize(device);
+        
+        // If we have a service, consider the restoration successful
+        if (_smartyService != null) {
+          // Set connected status
+          _connectedDevice = device;
+          
+          // Allow some time for the connection to stabilize
+          await Future.delayed(Duration(milliseconds: 500));
+          
+          // Set up notification handlers for status updates
+          await _setupNotificationsIfNeeded();
+          
+          // Request status update with retry mechanism
+          bool statusSuccess = await _requestStatusUpdateWithRetry();
+          
+          if (!statusSuccess) {
+            print("⚠️ BleManager: Could not get valid status update after reconnection");
+          }
+          
+          // Notify listeners of connection state change
+          _wifiStatusController.add(_connectedWifi);
+          
+          return true;
+        }
+      }
+      
+      return false;
+    } catch (e) {
+      print("❌ BleManager: Error restoring connections: $e");
+      return false;
+    }
+  }
+  
+  Future<bool> _requestStatusUpdateWithRetry() async {
+    int retries = 0;
+    const maxRetries = 3;
+    
+    while (retries < maxRetries) {
+      // print("📡 BleManager: Requesting status update after hot restart");
+      
+      try {
+        // Make sure notifications are enabled
+        await _setupNotificationsIfNeeded();
+        
+        // Request status update by reading
+        List<int> data = await _statusCharacteristic!.read();
+        
+        if (data.isNotEmpty) {
+          // Process the data
+          await _processStatusData(data);
+          
+          // Check if we have valid status data
+          if (_connectedWifi.isNotEmpty && _connectedWifi != "Unknown") {
+            // print("✅ BleManager: Successfully received status update");
+            return true;
+          }
+        }
+        
+        print("⚠️ BleManager: Status update empty or incomplete, retry ${retries + 1}/$maxRetries");
+        retries++;
+        await Future.delayed(Duration(milliseconds: 500 * retries));
+      } catch (e) {
+        print("⚠️ BleManager: Error requesting status update: $e");
+        retries++;
+        await Future.delayed(Duration(milliseconds: 500 * retries));
+      }
+    }
+    
+    print("⚠️ BleManager: Status update still empty after retries");
+    return false;
+  }
+
   // Dispose resources
   void dispose() {
+    // Close stream controllers
     _wifiStatusController.close();
     _batteryStatusController.close();
     _wifiStatusMessageController.close();
