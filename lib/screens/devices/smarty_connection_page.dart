@@ -4,6 +4,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../../services/ble_manager.dart';
 import '../../services/ble_service.dart';
 import '../wifi/wifi_config_page.dart';
+import 'package:app_settings/app_settings.dart';
 
 class SmartyConnectionPage extends StatefulWidget {
   const SmartyConnectionPage({super.key});
@@ -20,10 +21,20 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   bool _isCheckingConnectedDevices = true;
   StreamSubscription? _showSnackBarSubscription;
   StreamSubscription? _deviceConnectionSubscription;
+  String _scanningStatus = '';
+  List<BluetoothDevice> _discoveredDevices = [];
 
   @override
   void initState() {
     super.initState();
+    
+    // Initialize BleService with context for Bluetooth prompts
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        BleService.initialize(context);
+      }
+    });
+    
     _checkForConnectedSmartyDevice();
 
     _showSnackBarSubscription = _bleManager.showSnackBarStream.listen((
@@ -69,6 +80,27 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     });
 
     try {
+      // First check if Bluetooth is enabled
+      bool isBluetoothReady = await BleService.isBluetoothReady();
+      if (!isBluetoothReady) {
+        // Use the native method to request Bluetooth be turned on
+        try {
+          await FlutterBluePlus.turnOn();
+        } catch (e) {
+          print("Error requesting Bluetooth: $e");
+        }
+        
+        // Check again if Bluetooth got enabled
+        isBluetoothReady = await BleService.isBluetoothReady();
+        if (!isBluetoothReady) {
+          setState(() {
+            _isCheckingConnectedDevices = false;
+            _connectionResult = 'Bluetooth is required for device connections. Please enable it in your device settings.';
+          });
+          return;
+        }
+      }
+      
       bool restored = await _bleManager.restoreConnectionsAfterHotRestart();
 
       if (restored) {
@@ -81,6 +113,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         return;
       }
 
+      // Use the regular method since we already checked Bluetooth status
       List<BluetoothDevice> connectedDevices =
           await BleService.getConnectedDevices();
 
@@ -101,44 +134,84 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         _isCheckingConnectedDevices = false;
         _connectionResult = 'No connected devices found';
       });
-      _startScanning();
+      
+      // Check Bluetooth again before scanning - it might have been turned off
+      isBluetoothReady = await BleService.isBluetoothReady();
+      if (isBluetoothReady) {
+        _startScanning();
+      }
     } catch (e) {
       setState(() {
         _isCheckingConnectedDevices = false;
         _connectionResult = 'Error: $e';
       });
-      _startScanning();
+      
+      // Check Bluetooth status before attempting to scan
+      bool isBluetoothReady = await BleService.isBluetoothReady();
+      if (isBluetoothReady) {
+        _startScanning();
+      }
     }
   }
 
   Future<void> _startScanning() async {
+    if (_isScanning) return;
+
     setState(() {
       _isScanning = true;
-      _devices = [];
-      _connectionResult = '';
+      _scanningStatus = 'Scanning for Smarty devices...';
+      _discoveredDevices.clear();
     });
 
     try {
-      StreamSubscription<List<ScanResult>>? subscription;
-      subscription = BleService.scanForSmartyDevices().listen((results) {
+      bool isBluetoothReady = await BleService.isBluetoothReady();
+      if (!isBluetoothReady) {
+        // Try to turn on Bluetooth using the system dialog
+        try {
+          await FlutterBluePlus.turnOn();
+        } catch (e) {
+          print("Error requesting Bluetooth: $e");
+        }
+        
+        // Check again if Bluetooth got enabled
+        isBluetoothReady = await BleService.isBluetoothReady();
+        if (!isBluetoothReady) {
+          setState(() {
+            _isScanning = false;
+            _scanningStatus = 'Bluetooth is required for scanning. Please enable it in your device settings.';
+          });
+          return;
+        }
+      }
+
+      // Use the regular scan method since we already checked Bluetooth
+      await BleService.scanForSmartyDevicesWithCallback(_onDeviceDiscovered);
+      
+      // Handle no devices found after scan completes
+      if (_discoveredDevices.isEmpty) {
         setState(() {
-          _devices = results.map((result) => result.device).toList();
+          _scanningStatus = 'No Smarty devices found';
         });
-      });
-
-      await Future.delayed(Duration(seconds: 4));
-      await BleService.stopScan();
-      subscription.cancel();
-
-      setState(() {
-        _isScanning = false;
-      });
+      } else {
+        setState(() {
+          _scanningStatus = 'Found ${_discoveredDevices.length} Smarty device(s)';
+        });
+      }
     } catch (e) {
       setState(() {
-        _connectionResult = 'Failed to scan: $e';
+        _scanningStatus = 'Error: $e';
+      });
+    } finally {
+      setState(() {
         _isScanning = false;
       });
     }
+  }
+
+  void _onDeviceDiscovered(ScanResult result) {
+    setState(() {
+      _discoveredDevices.add(result.device);
+    });
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
@@ -244,10 +317,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                 Navigator.of(context).pop(); // Close dialog
                 Navigator.of(context).pop(); // Return to HomeTab
               },
-              child: Text(
-                'Skip',
-                style: TextStyle(color: Colors.white70),
-              ),
+              child: Text('Skip', style: TextStyle(color: Colors.white70)),
             ),
             ElevatedButton(
               onPressed: () {
@@ -305,10 +375,40 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
-        children: const [
+        children: [
           CircularProgressIndicator(),
           SizedBox(height: 16),
-          Text('Checking for connected devices...'),
+          Text(
+            _connectionResult.isEmpty 
+                ? 'Checking for connected devices...' 
+                : _connectionResult,
+            textAlign: TextAlign.center,
+          ),
+          
+          // Show Bluetooth instructions if relevant
+          if (_connectionResult.contains('Bluetooth'))
+            Padding(
+              padding: const EdgeInsets.only(top: 24.0),
+              child: Column(
+                children: [
+                  Icon(Icons.bluetooth_disabled, size: 48, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text(
+                    'Please enable Bluetooth in your device settings',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                  SizedBox(height: 24),
+                  ElevatedButton.icon(
+                    icon: Icon(Icons.refresh),
+                    label: Text('Try Again'),
+                    onPressed: () => _checkForConnectedSmartyDevice(),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -328,7 +428,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                 color:
                     _connectionResult.contains('Failed') ||
                             _connectionResult.contains('Error') ||
-                            _connectionResult.contains('timed out')
+                            _connectionResult.contains('timed out') ||
+                            _connectionResult.contains('Bluetooth is disabled')
                         ? Colors.red.withOpacity(0.1)
                         : _connectionResult.contains('Connecting')
                         ? Colors.blue.withOpacity(0.1)
@@ -338,34 +439,52 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                   color:
                       _connectionResult.contains('Failed') ||
                               _connectionResult.contains('Error') ||
-                              _connectionResult.contains('timed out')
+                              _connectionResult.contains('timed out') ||
+                              _connectionResult.contains('Bluetooth is disabled')
                           ? Colors.red
                           : _connectionResult.contains('Connecting')
                           ? Colors.blue
                           : Colors.green,
                 ),
               ),
-              child: Text(
-                _connectionResult,
-                style: TextStyle(
-                  color:
-                      _connectionResult.contains('Failed') ||
-                              _connectionResult.contains('Error') ||
-                              _connectionResult.contains('timed out')
-                          ? Colors.red
-                          : _connectionResult.contains('Connecting')
-                          ? Colors.blue
-                          : Colors.green,
-                  fontWeight: FontWeight.bold,
-                ),
-                textAlign: TextAlign.center,
+              child: Column(
+                children: [
+                  Text(
+                    _connectionResult,
+                    style: TextStyle(
+                      color:
+                          _connectionResult.contains('Failed') ||
+                                  _connectionResult.contains('Error') ||
+                                  _connectionResult.contains('timed out') ||
+                                  _connectionResult.contains('Bluetooth is disabled')
+                              ? Colors.red
+                              : _connectionResult.contains('Connecting')
+                              ? Colors.blue
+                              : Colors.green,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  
+                  // Add button to open Bluetooth settings if needed
+                  if (_connectionResult.contains('Bluetooth is required') || _connectionResult.contains('Bluetooth turned off'))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12.0),
+                      child: Text(
+                        'Please enable Bluetooth in your device settings',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontStyle: FontStyle.italic,
+                          color: Theme.of(context).hintColor,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ElevatedButton.icon(
             icon: Icon(Icons.bluetooth_searching),
-            label: Text(
-              _isScanning ? 'Scanning...' : 'Scan for Smarty Devices',
-            ),
+            label: Text(_isScanning ? 'Scanning...' : 'Look for your Smarty'),
             style: ElevatedButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
@@ -385,7 +504,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                         ],
                       ),
                     )
-                    : _devices.isEmpty
+                    : _discoveredDevices.isEmpty
                     ? Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -406,9 +525,44 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                           ),
                           SizedBox(height: 8),
                           Text(
-                            'Make sure your device is powered on and nearby',
+                            'Make sure your device is powered on and in pairing mode',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.grey[600]),
+                          ),
+                          SizedBox(height: 8),
+                          // Updated tip section
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16.0,
+                            ), // Add padding to constrain width
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.lightbulb_outline,
+                                  size: 16,
+                                  color: Colors.grey[600],
+                                ),
+                                SizedBox(width: 4),
+                                Flexible(
+                                  child: ConstrainedBox(
+                                    constraints: BoxConstraints(
+                                      maxWidth:
+                                          350, // Explicitly limit the text width
+                                    ),
+                                    child: Text(
+                                      'Tip: To enter pairing mode, press Vol + and Vol - together for 3 seconds',
+                                      softWrap: true,
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        color: Colors.grey[600],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                           SizedBox(height: 24),
                           ElevatedButton.icon(
@@ -442,9 +596,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                         SizedBox(height: 8),
                         Expanded(
                           child: ListView.builder(
-                            itemCount: _devices.length,
+                            itemCount: _discoveredDevices.length,
                             itemBuilder: (context, index) {
-                              final device = _devices[index];
+                              final device = _discoveredDevices[index];
                               return Card(
                                 elevation: 2,
                                 margin: EdgeInsets.only(bottom: 8),

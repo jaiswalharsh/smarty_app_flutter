@@ -301,7 +301,7 @@ class _SettingsTabState extends State<SettingsTab> {
       title: "Connect to Smarty Device",
       description: "Find and connect to your Smarty toy",
       icon: Icons.bluetooth_searching,
-      iconColor: themeProvider.isDarkMode ? Color(0xFF00FFCC) : Colors.blue,
+      iconColor: themeProvider.isDarkMode ? Color(0xFFFF6EC7) : Colors.blue,
       bgColor:
           themeProvider.isDarkMode ? Color(0xFF2C2C44) : Colors.blue.shade50,
       onTap: () {

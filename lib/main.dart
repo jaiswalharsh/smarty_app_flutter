@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'home_tab.dart'; 
 import 'settings_tab.dart'; 
 import 'utils/theme_provider.dart';
+import 'services/ble_service.dart';
 
 void main() {
   // Ensure Flutter is initialized
@@ -183,6 +184,18 @@ class _MyHomePageState extends State<MyHomePage> {
     HomeTab(), 
     SettingsTab(), 
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    
+    // Initialize BleService with context after the first frame is built
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        BleService.initialize(context);
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
