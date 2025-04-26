@@ -13,15 +13,11 @@ class SmartyConnectionPage extends StatefulWidget {
 }
 
 class SmartyConnectionPageState extends State<SmartyConnectionPage> {
-  // BLE manager
   final BleManager _bleManager = BleManager();
-
   String _connectionResult = '';
   List<BluetoothDevice> _devices = [];
   bool _isScanning = false;
   bool _isCheckingConnectedDevices = true;
-
-  // Stream subscriptions
   StreamSubscription? _showSnackBarSubscription;
   StreamSubscription? _deviceConnectionSubscription;
 
@@ -30,12 +26,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     super.initState();
     _checkForConnectedSmartyDevice();
 
-    // Listen for snackbar notifications
-    _showSnackBarSubscription = _bleManager.showSnackBarStream.listen((message) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    _showSnackBarSubscription = _bleManager.showSnackBarStream.listen((
+      message,
+    ) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     });
-    
-    // Listen for device connection state changes
+
     _subscribeToConnectionChanges();
   }
 
@@ -45,31 +43,25 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _deviceConnectionSubscription?.cancel();
     super.dispose();
   }
-  
-  // Subscribe to device connection state changes
+
   void _subscribeToConnectionChanges() {
     if (_bleManager.connectedDevice != null) {
-      // Cancel any existing subscription
       _deviceConnectionSubscription?.cancel();
-      
-      // Subscribe to connection state changes
-      _deviceConnectionSubscription = _bleManager.connectedDevice!.connectionState.listen((state) {
-        print("💡 Device connection state changed: $state");
-        if (state == BluetoothConnectionState.disconnected) {
-          print("❌ Device disconnected");
-          setState(() {
-            _devices = [];
-            _connectionResult = 'Device disconnected';
+      _deviceConnectionSubscription = _bleManager
+          .connectedDevice!
+          .connectionState
+          .listen((state) {
+            if (state == BluetoothConnectionState.disconnected) {
+              setState(() {
+                _devices = [];
+                _connectionResult = 'Device disconnected';
+              });
+              _checkForConnectedSmartyDevice();
+            }
           });
-          
-          // Force refresh the UI according to the current state
-          _checkForConnectedSmartyDevice();
-        }
-      });
     }
   }
 
-  // Check if a Smarty device is already connected
   Future<void> _checkForConnectedSmartyDevice() async {
     setState(() {
       _isCheckingConnectedDevices = true;
@@ -77,76 +69,40 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     });
 
     try {
-      print("🔄 SmartyConnectionPage: Checking for connected devices after possible hot restart");
-      
-      // First try to restore connection after hot restart
-      setState(() {
-        _connectionResult = 'Attempting to restore previous connection...';
-      });
-      
       bool restored = await _bleManager.restoreConnectionsAfterHotRestart();
-      
+
       if (restored) {
-        print("✅ SmartyConnectionPage: Successfully restored connection after hot restart");
         setState(() {
           _isCheckingConnectedDevices = false;
-          _connectionResult = 'Connected to ${_bleManager.connectedDevice?.platformName ?? "Smarty device"}';
+          _connectionResult =
+              'Connected to ${_bleManager.connectedDevice?.platformName ?? "Smarty device"}';
         });
-        
-        // Show connection success with options
-        if (_bleManager.connectedDevice != null) {
-          _showConnectionSuccess(_bleManager.connectedDevice!);
-        }
+        _handleConnectionSuccess(_bleManager.connectedDevice!);
         return;
       }
-      
-      // If restoration fails, continue with normal flow
-      // print("🔄 SmartyConnectionPage: Checking connected devices using traditional method");
-      // Get already connected devices
-      setState(() {
-        _connectionResult = 'Checking for connected devices...';
-      });
-      
-      List<BluetoothDevice> connectedDevices = await BleService.getConnectedDevices();
-      // print(
-      //   "🔍 Checking for connected Smarty devices. Found ${connectedDevices.length} connected devices.",
-      // );
+
+      List<BluetoothDevice> connectedDevices =
+          await BleService.getConnectedDevices();
 
       for (BluetoothDevice device in connectedDevices) {
         if (device.platformName.toLowerCase().contains("smarty")) {
-          // print(
-          //   "✅ Found already connected Smarty device: ${device.platformName}",
-          // );
-
-          // Initialize the BLE manager with this device
-          setState(() {
-            _connectionResult = 'Connecting to ${device.platformName}...';
-          });
-          
           await _bleManager.initialize(device);
-          
-          // Subscribe to connection state changes
           _subscribeToConnectionChanges();
-
           setState(() {
             _isCheckingConnectedDevices = false;
             _connectionResult = 'Connected to ${device.platformName}';
           });
-          
-          // Show connection success with options instead of auto-navigating
-          _showConnectionSuccess(device);
+          _handleConnectionSuccess(device);
           return;
         }
       }
 
-      // No connected Smarty device found, start scanning
       setState(() {
         _isCheckingConnectedDevices = false;
-        _connectionResult = 'No connected devices found'; 
+        _connectionResult = 'No connected devices found';
       });
       _startScanning();
     } catch (e) {
-      // print("❌ Error checking for connected devices: $e");
       setState(() {
         _isCheckingConnectedDevices = false;
         _connectionResult = 'Error: $e';
@@ -158,26 +114,18 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   Future<void> _startScanning() async {
     setState(() {
       _isScanning = true;
-      _devices = []; // Clear existing devices when starting a new scan
+      _devices = [];
       _connectionResult = '';
     });
 
     try {
-      // Listen for scan results
       StreamSubscription<List<ScanResult>>? subscription;
       subscription = BleService.scanForSmartyDevices().listen((results) {
         setState(() {
-          // Clear and rebuild the device list from current scan results only
-          _devices = [];
-          
-          // Add only devices from the current scan results
-          for (ScanResult result in results) {
-            _devices.add(result.device);
-          }
+          _devices = results.map((result) => result.device).toList();
         });
       });
 
-      // Stop scanning after 4 seconds
       await Future.delayed(Duration(seconds: 4));
       await BleService.stopScan();
       subscription.cancel();
@@ -199,32 +147,23 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     });
 
     try {
-      // Set up a timeout for the connection attempt
       bool connectionSuccessful = false;
-      
-      // Try to connect with a timeout
+
       await Future.any([
-        // Actual connection attempt
         device.connect().then((_) {
           connectionSuccessful = true;
         }),
-        // Timeout after 10 seconds
         Future.delayed(Duration(seconds: 10)).then((_) {
           if (!connectionSuccessful) {
             throw TimeoutException('Connection attempt timed out');
           }
-        })
+        }),
       ]);
-      
-      // If we got here and the connection was successful
+
       if (connectionSuccessful) {
-        // Initialize the BLE manager with this device
         await _bleManager.initialize(device);
-        
-        // Subscribe to connection state changes for the new device
         _subscribeToConnectionChanges();
 
-        // Show a snackbar
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Connected to ${device.platformName}'),
@@ -235,33 +174,36 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         setState(() {
           _connectionResult = 'Connected to ${device.platformName}';
         });
-        
-        // Get device status
+
         await Future.delayed(Duration(milliseconds: 500));
         await _bleManager.readStatusUpdate();
-        
-        // Show connection success with options
-        _showConnectionSuccess(device);
-      } else {
-        throw Exception('Connection failed');
+
+        _handleConnectionSuccess(device);
       }
     } catch (e) {
-      // print("❌ Error connecting to device: $e");
       setState(() {
         if (e is TimeoutException) {
-          _connectionResult = 'Connection timed out. Device may be out of range.';
+          _connectionResult =
+              'Connection timed out. Device may be out of range.';
         } else {
           _connectionResult = 'Failed to connect: $e';
         }
-        
-        // Refresh the device list after a failed connection attempt
         _startScanning();
       });
     }
   }
 
-  // Show connection success dialog with options
-  void _showConnectionSuccess(BluetoothDevice device) {
+  void _handleConnectionSuccess(BluetoothDevice device) {
+    if (_bleManager.isWifiConnected) {
+      // If WiFi is already connected, navigate back to HomeTab
+      Navigator.of(context).pop();
+    } else {
+      // Show popup to ask about WiFi setup
+      _showWifiSetupPopup(device);
+    }
+  }
+
+  void _showWifiSetupPopup(BluetoothDevice device) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -269,9 +211,16 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         return AlertDialog(
           title: Row(
             children: [
-              Icon(Icons.check_circle, color: Colors.green),
+              Icon(Icons.bluetooth, color: Colors.blue.shade600, size: 24),
               SizedBox(width: 8),
-              Text("Connected to Smarty"),
+              Text(
+                'Smarty Connected',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white70,
+                ),
+              ),
             ],
           ),
           content: Column(
@@ -279,82 +228,57 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                "Your Smarty device is now connected via Bluetooth!",
-                style: TextStyle(fontSize: 16),
+                'Your Smarty is not connected to any WiFi network. Please connect to a WiFi network to use the Smarty.',
+                style: TextStyle(fontSize: 16, color: Colors.white70),
               ),
-              SizedBox(height: 16),
-              Row(
-                children: [
-                  Icon(
-                    _bleManager.isWifiConnected ? Icons.wifi : Icons.wifi_off,
-                    color: _bleManager.isWifiConnected ? Colors.green : Colors.orange,
-                    size: 20,
-                  ),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _bleManager.isWifiConnected 
-                          ? "WiFi: Connected to ${_bleManager.connectedWifi}" 
-                          : "WiFi: Not connected",
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
+              SizedBox(height: 12),
+              Text(
+                'Would you like to set up WiFi now?',
+                style: TextStyle(fontSize: 16, color: Colors.white70),
               ),
-              SizedBox(height: 16),
-              Text("What would you like to do next?"),
             ],
           ),
           actions: [
             TextButton(
               onPressed: () {
                 Navigator.of(context).pop(); // Close dialog
-                // Navigate to home page
-                Navigator.of(context).pop(); // Return to previous screen
+                Navigator.of(context).pop(); // Return to HomeTab
               },
-              child: Text("Continue to Home"),
-            ),
-            ElevatedButton.icon(
-              icon: Icon(Icons.wifi),
-              label: Text("Set Up WiFi"),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue,
+              child: Text(
+                'Skip',
+                style: TextStyle(color: Colors.white70),
               ),
+            ),
+            ElevatedButton(
               onPressed: () {
                 Navigator.of(context).pop(); // Close dialog
-                _navigateToWifiConfigPage(); // Navigate to WiFi config
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => WifiConfigPage()),
+                );
               },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue.shade600,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: Text('Set Up WiFi'),
             ),
           ],
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(12),
           ),
         );
       },
     );
   }
 
-  // Navigate to WiFi configuration page
-  void _navigateToWifiConfigPage() {
-    if (_bleManager.isConnected) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => WifiConfigPage(),
-        ),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      // Dismiss keyboard when tapping outside of text fields
-      onTap: () {
-        FocusScope.of(context).unfocus();
-      },
+      onTap: () => FocusScope.of(context).unfocus(),
       child: Scaffold(
         appBar: AppBar(
           title: Text(
@@ -369,14 +293,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
           backgroundColor: Theme.of(context).primaryColor,
           foregroundColor: Colors.white,
         ),
-        body: _isCheckingConnectedDevices
-            ? _buildLoadingView()
-            : _buildContentView(),
+        body:
+            _isCheckingConnectedDevices
+                ? _buildLoadingView()
+                : _buildContentView(),
       ),
     );
   }
 
-  // Loading view while checking for connected devices
   Widget _buildLoadingView() {
     return Center(
       child: Column(
@@ -390,33 +314,33 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     );
   }
 
-  // Main content view
   Widget _buildContentView() {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          // Connection status message
           if (_connectionResult.isNotEmpty)
             Container(
               margin: EdgeInsets.only(bottom: 16),
               padding: EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: _connectionResult.contains('Failed') || 
-                      _connectionResult.contains('Error') ||
-                      _connectionResult.contains('timed out')
-                    ? Colors.red.withOpacity(0.1)
-                    : _connectionResult.contains('Connecting')
+                color:
+                    _connectionResult.contains('Failed') ||
+                            _connectionResult.contains('Error') ||
+                            _connectionResult.contains('timed out')
+                        ? Colors.red.withOpacity(0.1)
+                        : _connectionResult.contains('Connecting')
                         ? Colors.blue.withOpacity(0.1)
                         : Colors.green.withOpacity(0.1),
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
-                  color: _connectionResult.contains('Failed') || 
-                        _connectionResult.contains('Error') ||
-                        _connectionResult.contains('timed out')
-                      ? Colors.red
-                      : _connectionResult.contains('Connecting')
+                  color:
+                      _connectionResult.contains('Failed') ||
+                              _connectionResult.contains('Error') ||
+                              _connectionResult.contains('timed out')
+                          ? Colors.red
+                          : _connectionResult.contains('Connecting')
                           ? Colors.blue
                           : Colors.green,
                 ),
@@ -424,11 +348,12 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
               child: Text(
                 _connectionResult,
                 style: TextStyle(
-                  color: _connectionResult.contains('Failed') || 
-                        _connectionResult.contains('Error') ||
-                        _connectionResult.contains('timed out')
-                      ? Colors.red
-                      : _connectionResult.contains('Connecting')
+                  color:
+                      _connectionResult.contains('Failed') ||
+                              _connectionResult.contains('Error') ||
+                              _connectionResult.contains('timed out')
+                          ? Colors.red
+                          : _connectionResult.contains('Connecting')
                           ? Colors.blue
                           : Colors.green,
                   fontWeight: FontWeight.bold,
@@ -436,34 +361,32 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                 textAlign: TextAlign.center,
               ),
             ),
-
-          // Scan button
           ElevatedButton.icon(
             icon: Icon(Icons.bluetooth_searching),
-            label: Text(_isScanning ? 'Scanning...' : 'Scan for Smarty Devices'),
+            label: Text(
+              _isScanning ? 'Scanning...' : 'Scan for Smarty Devices',
+            ),
             style: ElevatedButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
             onPressed: _isScanning ? null : _startScanning,
           ),
-          
           SizedBox(height: 16),
-          
-          // Scanning indicator or device list
           Expanded(
-            child: _isScanning
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: const [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 8),
-                      Text('Scanning for devices...'),
-                    ],
-                  ),
-                )
-              : _devices.isEmpty
-                  ? Center(
+            child:
+                _isScanning
+                    ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: const [
+                          CircularProgressIndicator(),
+                          SizedBox(height: 8),
+                          Text('Scanning for devices...'),
+                        ],
+                      ),
+                    )
+                    : _devices.isEmpty
+                    ? Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -496,7 +419,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                         ],
                       ),
                     )
-                  : Column(
+                    : Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
@@ -528,7 +451,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                                 child: ListTile(
                                   title: Text(
                                     device.platformName,
-                                    style: TextStyle(fontWeight: FontWeight.bold),
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
                                   ),
                                   trailing: Icon(
                                     Icons.bluetooth,
@@ -547,4 +472,4 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       ),
     );
   }
-} 
+}

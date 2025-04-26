@@ -142,8 +142,7 @@ class ThemeProvider with ChangeNotifier {
       colorScheme: ColorScheme.dark(
         primary: Color(0xFF8A2BE2),        // Blueviolet
         secondary: Color(0xFFFF6EC7),      // Hot Pink
-        tertiary: Color(0xFF00FFCC),       // Bright Teal
-        background: Color(0xFF1A1A2E),     // Deep Blue-Black
+        tertiary: Color(0xFF00FFCC),     // Deep Blue-Black
         surface: Color(0xFF2C2C44),        // Dark Blue-Purple
         error: Color(0xFFFF5252),          // Bright Red
       ),
@@ -213,14 +212,14 @@ class ThemeProvider with ChangeNotifier {
         ),
       ),
       switchTheme: SwitchThemeData(
-        thumbColor: MaterialStateProperty.resolveWith<Color>((states) {
-          if (states.contains(MaterialState.selected)) {
+        thumbColor: WidgetStateProperty.resolveWith<Color>((states) {
+          if (states.contains(WidgetState.selected)) {
             return Color(0xFFFF6EC7); // Hot Pink when selected
           }
           return Colors.white;
         }),
-        trackColor: MaterialStateProperty.resolveWith<Color>((states) {
-          if (states.contains(MaterialState.selected)) {
+        trackColor: WidgetStateProperty.resolveWith<Color>((states) {
+          if (states.contains(WidgetState.selected)) {
             return Color(0xFF8A2BE2).withOpacity(0.5); // Blueviolet track
           }
           return Colors.grey.shade400;

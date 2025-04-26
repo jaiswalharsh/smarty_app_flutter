@@ -33,7 +33,7 @@ class BleManager {
   // Status information
   String _connectedWifi = "Unknown";
   int _batteryLevel = 0;
-  String _wifiStatusMessage = "";
+  final String _wifiStatusMessage = "";
 
   // Stream controllers for status updates
   final _wifiStatusController = StreamController<String>.broadcast();
@@ -393,7 +393,7 @@ class BleManager {
     } else {
       // Handle simple format (status,level)
       List<String> statusParts = statusString.split(',');
-      if (statusParts.length >= 1) {
+      if (statusParts.isNotEmpty) {
         // First part is WiFi name
         String wifiName = statusParts[0];
         _connectedWifi = wifiName;
