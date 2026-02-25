@@ -4,7 +4,6 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../../services/ble_manager.dart';
 import '../../services/ble_service.dart';
 import '../wifi/wifi_config_page.dart';
-import 'package:app_settings/app_settings.dart';
 
 class SmartyConnectionPage extends StatefulWidget {
   const SmartyConnectionPage({super.key});
@@ -22,7 +21,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   StreamSubscription? _showSnackBarSubscription;
   StreamSubscription? _deviceConnectionSubscription;
   String _scanningStatus = '';
-  List<BluetoothDevice> _discoveredDevices = [];
+  final List<BluetoothDevice> _discoveredDevices = [];
 
   @override
   void initState() {
@@ -209,9 +208,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   }
 
   void _onDeviceDiscovered(ScanResult result) {
-    setState(() {
-      _discoveredDevices.add(result.device);
-    });
+    final alreadyExists = _discoveredDevices.any(
+      (d) => d.remoteId == result.device.remoteId,
+    );
+    if (!alreadyExists) {
+      setState(() {
+        _discoveredDevices.add(result.device);
+      });
+    }
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
@@ -266,13 +270,26 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     }
   }
 
-  void _handleConnectionSuccess(BluetoothDevice device) {
-    if (_bleManager.isWifiConnected) {
-      // If WiFi is already connected, navigate back to HomeTab
-      Navigator.of(context).pop();
-    } else {
-      // Show popup to ask about WiFi setup
-      _showWifiSetupPopup(device);
+  Future<void> _handleConnectionSuccess(BluetoothDevice device) async {
+    // Wait for a definitive WiFi status — the device may report
+    // transient states like "Init" right after BLE connection
+    for (int i = 0; i < 5; i++) {
+      if (_bleManager.isWifiConnected) {
+        if (mounted) Navigator.of(context).pop();
+        return;
+      }
+      // If status is still unknown/transient, wait and re-read
+      await Future.delayed(const Duration(milliseconds: 500));
+      await _bleManager.readStatusUpdate();
+    }
+
+    // After retries, if still not connected, show WiFi setup
+    if (mounted) {
+      if (_bleManager.isWifiConnected) {
+        Navigator.of(context).pop();
+      } else {
+        _showWifiSetupPopup(device);
+      }
     }
   }
 
@@ -291,7 +308,6 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                 style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
-                  color: Colors.white70,
                 ),
               ),
             ],
@@ -302,12 +318,12 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
             children: [
               Text(
                 'Your Smarty is not connected to any WiFi network. Please connect to a WiFi network to use the Smarty.',
-                style: TextStyle(fontSize: 16, color: Colors.white70),
+                style: TextStyle(fontSize: 16),
               ),
               SizedBox(height: 12),
               Text(
                 'Would you like to set up WiFi now?',
-                style: TextStyle(fontSize: 16, color: Colors.white70),
+                style: TextStyle(fontSize: 16),
               ),
             ],
           ),
@@ -317,7 +333,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                 Navigator.of(context).pop(); // Close dialog
                 Navigator.of(context).pop(); // Return to HomeTab
               },
-              child: Text('Skip', style: TextStyle(color: Colors.white70)),
+              child: Text('Skip'),
             ),
             ElevatedButton(
               onPressed: () {

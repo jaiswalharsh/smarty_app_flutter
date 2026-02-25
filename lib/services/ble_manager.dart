@@ -55,6 +55,8 @@ class BleManager {
   bool get isConnected => _connectedDevice != null;
   bool get isWifiConnected =>
       _connectedWifi.trim().isNotEmpty &&
+      _connectedWifi != "Unknown" &&
+      _connectedWifi != "NotConnected" &&
       _connectedWifi != "Init" &&
       _connectedWifi != "Initializing" &&
       _connectedWifi != "Auth Failed" &&
