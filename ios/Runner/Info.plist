@@ -30,10 +30,6 @@
 	<string>This app needs Bluetooth access to scan and connect to Smarty devices</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>This app needs Bluetooth access to scan and connect to Smarty devices</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>The app needs to scan WiFi networks in order to send config to Smarty Toy</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>The app needs to scan WiFi networks in order to send config to Smarty Toy</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>The app needs to scan WiFi networks in order to send config to Smarty Toy</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
