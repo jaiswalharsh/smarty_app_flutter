@@ -39,7 +39,6 @@ class BleManager {
   // Status information
   String _connectedWifi = "Unknown";
   int _batteryLevel = 0;
-  final String _wifiStatusMessage = "";
 
   // Stream controllers for status updates
   final _wifiStatusController = StreamController<String>.broadcast();
@@ -52,7 +51,6 @@ class BleManager {
   BluetoothService? get smartyService => _smartyService;
   String get connectedWifi => _connectedWifi;
   int get batteryLevel => _batteryLevel;
-  String get wifiStatusMessage => _wifiStatusMessage;
   Stream<String> get wifiStatusStream => _wifiStatusController.stream;
   Stream<int> get batteryStatusStream => _batteryStatusController.stream;
   Stream<String> get wifiStatusMessageStream =>

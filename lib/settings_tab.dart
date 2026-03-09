@@ -18,8 +18,7 @@ class _SettingsTabState extends State<SettingsTab> {
   // BLE manager
   final BleManager _bleManager = BleManager();
 
-  // Stream subscription
-  StreamSubscription? _wifiStatusSubscription;
+  // Stream subscriptions
   StreamSubscription? _deviceConnectionSubscription;
   StreamSubscription? _showSnackBarSubscription;
 
@@ -57,7 +56,6 @@ class _SettingsTabState extends State<SettingsTab> {
 
   @override
   void dispose() {
-    _wifiStatusSubscription?.cancel();
     _deviceConnectionSubscription?.cancel();
     _showSnackBarSubscription?.cancel();
     super.dispose();

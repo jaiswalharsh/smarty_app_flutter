@@ -14,15 +14,12 @@ class WifiConfigPageState extends State<WifiConfigPage> {
   // BLE manager
   final BleManager _bleManager = BleManager();
 
-  final bool _isScanningWifi = false;
-
   // Current WiFi information
   String _currentWifiName = "Unknown";
   bool _isLoading = true;
 
   // Stream subscriptions
   StreamSubscription? _wifiStatusSubscription;
-  StreamSubscription? _wifiStatusMessageSubscription;
   StreamSubscription? _showSnackBarSubscription;
 
   @override
@@ -56,7 +53,6 @@ class WifiConfigPageState extends State<WifiConfigPage> {
   @override
   void dispose() {
     _wifiStatusSubscription?.cancel();
-    _wifiStatusMessageSubscription?.cancel();
     _showSnackBarSubscription?.cancel();
     super.dispose();
   }
@@ -258,23 +254,6 @@ class WifiConfigPageState extends State<WifiConfigPage> {
             onPressed: _navigateToWifiNetworkPage,
           ),
           
-          SizedBox(height: 16),
-          
-          // WiFi scanning indicator
-          if (_isScanningWifi)
-            Expanded(
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 16),
-                    Text('Scanning for WiFi networks...'),
-                  ],
-                ),
-              ),
-            ),
-            
           // Space at the bottom for future elements
           Spacer(),
         ],

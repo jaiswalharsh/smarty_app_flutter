@@ -23,9 +23,6 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   List<String> _wifiNetworks = [];
   bool _isScanningWifi = true;
   String _statusMessage = 'Scanning for WiFi networks...';
-  
-  // Map to store chunks of WiFi scan data
-  final Map<int, String> _wifiScanChunks = {};
 
   // WiFi scan notification subscription
   StreamSubscription<List<int>>? _wifiScanSubscription;
@@ -48,7 +45,6 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
       _isScanningWifi = true;
       _wifiNetworks = [];
       _statusMessage = 'Scanning for WiFi networks...';
-      _wifiScanChunks.clear();
     });
 
     // Cancel any previous scan subscription
