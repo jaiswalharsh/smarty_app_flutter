@@ -253,10 +253,7 @@ class BleManager {
         },
       );
 
-      // Schedule an initial read after a small delay to allow notifications to be set up
-      Future.delayed(Duration(milliseconds: 500), () {
-        readStatusUpdate();
-      });
+      // Notifications will emit the current value automatically — no explicit read needed
     } catch (e) {
       print("❌ BleManager: Error setting up status updates: $e");
     }

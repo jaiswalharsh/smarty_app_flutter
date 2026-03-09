@@ -251,13 +251,13 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   Future<void> _handleConnectionSuccess(BluetoothDevice device) async {
     // Wait for a definitive WiFi status — the device may report
     // transient states like "Init" right after BLE connection
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 3; i++) {
       if (_bleManager.isWifiConnected) {
         if (mounted) Navigator.of(context).pop();
         return;
       }
-      // If status is still unknown/transient, wait and re-read
-      await Future.delayed(const Duration(milliseconds: 500));
+      // Give the device time to connect to WiFi before re-reading
+      await Future.delayed(const Duration(seconds: 1));
       await _bleManager.readStatusUpdate();
     }
 

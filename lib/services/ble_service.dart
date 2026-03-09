@@ -298,17 +298,24 @@ class BleService {
     }
   }
   
+  // Debounce: prevent rapid scan spam from multiple callers
+  static DateTime _lastReconnectScanTime = DateTime.fromMillisecondsSinceEpoch(0);
+
   // Internal method for getting connected devices
   static Future<List<BluetoothDevice>> _getConnectedDevicesInternal() async {
     // Get the list of connected devices from the cache
     List<BluetoothDevice> connectedDevices = FlutterBluePlus.connectedDevices;
-    
+
     // If no devices found in cache, try to get system-connected devices
     if (connectedDevices.isEmpty) {
-      // print("🔄 No devices in cache, trying additional methods...");
-      
+      // Skip scan if one ran recently (within 3 seconds)
+      if (DateTime.now().difference(_lastReconnectScanTime).inSeconds < 3) {
+        return [];
+      }
+      _lastReconnectScanTime = DateTime.now();
+
       try {
-        // Try to reconnect to previously known devices by scanning 
+        // Try to reconnect to previously known devices by scanning
         print("📱 Scanning for nearby Smarty devices to reconnect...");
         
         // Verify Bluetooth is still ready before scanning
