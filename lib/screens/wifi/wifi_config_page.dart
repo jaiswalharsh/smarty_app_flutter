@@ -114,12 +114,13 @@ class WifiConfigPageState extends State<WifiConfigPage> {
     }
   }
 
-  // Navigate to device connection page
+  // Navigate to device connection page (deferred to after current frame)
   void _navigateToDeviceConnectionPage() {
-    // Only navigate back if we're not already popping
-    if (Navigator.canPop(context)) {
-      Navigator.of(context).pop();
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && Navigator.canPop(context)) {
+        Navigator.of(context).pop();
+      }
+    });
   }
 
   // Reset WiFi connection

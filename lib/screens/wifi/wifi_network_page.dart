@@ -27,10 +27,19 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   // Map to store chunks of WiFi scan data
   final Map<int, String> _wifiScanChunks = {};
 
+  // WiFi scan notification subscription
+  StreamSubscription<List<int>>? _wifiScanSubscription;
+
   @override
   void initState() {
     super.initState();
     _scanWifiNetworks();
+  }
+
+  @override
+  void dispose() {
+    _wifiScanSubscription?.cancel();
+    super.dispose();
   }
 
   // Scan for WiFi networks
@@ -41,6 +50,10 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
       _statusMessage = 'Scanning for WiFi networks...';
       _wifiScanChunks.clear();
     });
+
+    // Cancel any previous scan subscription
+    _wifiScanSubscription?.cancel();
+    _wifiScanSubscription = null;
 
     // Add a delay for any in-progress WiFi operations to complete
     await Future.delayed(Duration(milliseconds: 500));
@@ -74,9 +87,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         int retryCount = 0;
         
         // Listen for notifications using the value stream
-        StreamSubscription<List<int>>? subscription;
-        
-        subscription = wifiScanCharacteristic.lastValueStream.listen((value) {
+        _wifiScanSubscription = wifiScanCharacteristic.lastValueStream.listen((value) {
           if (value.isEmpty) {
             // print("⚠️ Received empty notification data");
             return;
@@ -136,7 +147,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
                 });
                 
                 // Cancel the subscription
-                subscription?.cancel();
+                _wifiScanSubscription?.cancel();
               }
             });
             return;
@@ -157,7 +168,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
               expectedNetworks > 0 && notifications.length >= expectedNetworks) {
             print("📶 Received all expected networks and END marker");
             _processWifiScanData(notifications.join('\n'));
-            subscription?.cancel();
+            _wifiScanSubscription?.cancel();
           }
         });
         
@@ -194,7 +205,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         Future.delayed(Duration(seconds: 15), () {
           if (_isScanningWifi) {
             // print("⏱️ Timeout reached, checking collected notifications");
-            subscription?.cancel();
+            _wifiScanSubscription?.cancel();
             
             // Process whatever notifications we have if any
             if (notifications.isNotEmpty) {

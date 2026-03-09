@@ -213,41 +213,31 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     });
 
     try {
-      bool connectionSuccessful = false;
+      await device.connect(timeout: const Duration(seconds: 10));
 
-      await Future.any([
-        device.connect().then((_) {
-          connectionSuccessful = true;
-        }),
-        Future.delayed(Duration(seconds: 10)).then((_) {
-          if (!connectionSuccessful) {
-            throw TimeoutException('Connection attempt timed out');
-          }
-        }),
-      ]);
+      await _bleManager.initialize(device);
 
-      if (connectionSuccessful) {
-        await _bleManager.initialize(device);
+      if (!mounted) return;
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connected to ${device.platformName}'),
-            backgroundColor: Colors.green,
-          ),
-        );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Connected to ${device.platformName}'),
+          backgroundColor: Colors.green,
+        ),
+      );
 
-        setState(() {
-          _connectionResult = 'Connected to ${device.platformName}';
-        });
-
-        await Future.delayed(Duration(milliseconds: 500));
-        await _bleManager.readStatusUpdate();
-
-        _handleConnectionSuccess(device);
-      }
-    } catch (e) {
       setState(() {
-        if (e is TimeoutException) {
+        _connectionResult = 'Connected to ${device.platformName}';
+      });
+
+      await Future.delayed(Duration(milliseconds: 500));
+      await _bleManager.readStatusUpdate();
+
+      _handleConnectionSuccess(device);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        if (e is TimeoutException || e.toString().contains('timed out')) {
           _connectionResult =
               'Connection timed out. Device may be out of range.';
         } else {

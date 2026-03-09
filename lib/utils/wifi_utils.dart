@@ -189,23 +189,29 @@ class WifiUtils {
           bool authFailed = false;
           StreamSubscription<List<int>>? subscription;
           
-          subscription = statusCharacteristic.lastValueStream.listen((value) {
-            if (value.isEmpty) return;
-            
-            String statusString = String.fromCharCodes(value);
-            Map<String, String> statusValues = parseStatusUpdate(statusString);
-            
-            if (statusValues.containsKey('WIFI') && 
-                statusValues['WIFI'] == "AuthFailed") {
-              authFailed = true;
-              onStatusUpdate('Authentication failed. Please check your WiFi password.');
-              subscription?.cancel();
-            }
-          });
-          
+          subscription = statusCharacteristic.lastValueStream.listen(
+            (value) {
+              if (value.isEmpty) return;
+
+              String statusString = String.fromCharCodes(value);
+              Map<String, String> statusValues = parseStatusUpdate(statusString);
+
+              if (statusValues.containsKey('WIFI') &&
+                  statusValues['WIFI'] == "AuthFailed") {
+                authFailed = true;
+                onStatusUpdate('Authentication failed. Please check your WiFi password.');
+                subscription?.cancel();
+              }
+            },
+            onError: (error) {
+              print("⚠️ WifiUtils: Status stream error during auth check: $error");
+              subscription = null;
+            },
+          );
+
           // Wait for a short time to see if auth fails
           await Future.delayed(Duration(seconds: 5));
-          subscription.cancel();
+          subscription?.cancel();
           
           if (authFailed) {
             return false;

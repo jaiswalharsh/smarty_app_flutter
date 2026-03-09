@@ -223,29 +223,35 @@ class BleManager {
       DateTime lastUpdateTime = DateTime.now();
 
       // Listen for notifications
-      _statusNotificationSubscription = _statusCharacteristic!.lastValueStream.listen((value) {
-        if (value.isEmpty) {
-          // print("⚠️ BleManager: Received empty status notification");
-          return;
-        }
+      _statusNotificationSubscription = _statusCharacteristic!.lastValueStream.listen(
+        (value) {
+          if (value.isEmpty) return;
 
-        String statusString = String.fromCharCodes(value);
+          String statusString = String.fromCharCodes(value);
 
-        // Debounce: Skip if this is the same status string received within the last 500ms
-        if (statusString == lastStatusString &&
-            DateTime.now().difference(lastUpdateTime).inMilliseconds < 500) {
-          return;
-        }
+          // Debounce: Skip if this is the same status string received within the last 500ms
+          if (statusString == lastStatusString &&
+              DateTime.now().difference(lastUpdateTime).inMilliseconds < 500) {
+            return;
+          }
 
-        // Update debounce tracking
-        lastStatusString = statusString;
-        lastUpdateTime = DateTime.now();
+          // Update debounce tracking
+          lastStatusString = statusString;
+          lastUpdateTime = DateTime.now();
 
-        print("📊 BleManager: Status notification received: $statusString");
+          print("📊 BleManager: Status notification received: $statusString");
 
-        // Process status data
-        _processStatusData(value);
-      });
+          // Process status data
+          _processStatusData(value);
+        },
+        onError: (error) {
+          print("❌ BleManager: Status notification stream error: $error");
+          _statusNotificationSubscription = null;
+        },
+        onDone: () {
+          _statusNotificationSubscription = null;
+        },
+      );
 
       // Schedule an initial read after a small delay to allow notifications to be set up
       Future.delayed(Duration(milliseconds: 500), () {
