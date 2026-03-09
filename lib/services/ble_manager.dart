@@ -30,6 +30,12 @@ class BleManager {
   BluetoothCharacteristic? _userDataCharacteristic;
   // BluetoothCharacteristic? _statusUpdateCharacteristic;
 
+  // Connection state subscription
+  StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
+
+  // Status notification subscription
+  StreamSubscription<List<int>>? _statusNotificationSubscription;
+
   // Status information
   String _connectedWifi = "Unknown";
   int _batteryLevel = 0;
@@ -78,13 +84,20 @@ class BleManager {
     print("🔄 BleManager: Initializing with device: ${device.platformName}");
 
     // Discover services
-    await _discoverServices();
+    bool servicesReady = await _discoverServices();
+
+    if (!servicesReady) {
+      print("❌ BleManager: Service discovery failed — required services/characteristics not found");
+      _showSnackBarController.add("Device missing required Smarty service");
+      _resetConnectionState();
+      return;
+    }
 
     // Set up status updates
     if (_statusCharacteristic != null) {
       _setupStatusUpdates();
     }
-    
+
     // Set up connection state monitoring
     _monitorDeviceConnection();
   }
@@ -92,10 +105,11 @@ class BleManager {
   // Monitor device connection state
   void _monitorDeviceConnection() {
     if (_connectedDevice == null) return;
-    
-    // print("🔄 Setting up device connection monitoring");
-    
-    _connectedDevice!.connectionState.listen((BluetoothConnectionState state) {
+
+    // Cancel any previous subscription to avoid listener accumulation
+    _connectionStateSubscription?.cancel();
+
+    _connectionStateSubscription = _connectedDevice!.connectionState.listen((BluetoothConnectionState state) {
       print("💡 Device connection state changed: $state");
       
       if (state == BluetoothConnectionState.connected) {
@@ -123,6 +137,10 @@ class BleManager {
   
   // Reset the connection state when device is disconnected
   void _resetConnectionState() {
+    _connectionStateSubscription?.cancel();
+    _connectionStateSubscription = null;
+    _statusNotificationSubscription?.cancel();
+    _statusNotificationSubscription = null;
     _smartyService = null;
     _statusCharacteristic = null;
     _wifiScanCharacteristic = null;
@@ -133,59 +151,55 @@ class BleManager {
     _connectedDevice = null;
   }
 
-  // Discover services and cache characteristics
-  Future<void> _discoverServices() async {
-    if (_connectedDevice == null) return;
+  // Discover services and cache characteristics. Returns false if required
+  // service or characteristics are missing.
+  Future<bool> _discoverServices() async {
+    if (_connectedDevice == null) return false;
 
     try {
       List<BluetoothService> services =
           await _connectedDevice!.discoverServices();
       _smartyService = BleService.findSmartyService(services);
 
-      if (_smartyService != null) {
-        // print("✅ BleManager: Found Smarty service: ${_smartyService!.uuid}");
-
-        // Cache characteristics
-        _statusCharacteristic = BleService.findCharacteristic(
-          _smartyService!,
-          "ab04",
-        );
-        _wifiScanCharacteristic = BleService.findCharacteristic(
-          _smartyService!,
-          "ab01",
-        );
-        _wifiCredsCharacteristic = BleService.findCharacteristic(
-          _smartyService!,
-          "ab02",
-        );
-        _userDataCharacteristic = BleService.findCharacteristic(
-          _smartyService!,
-          "ab03",
-        );
-        // _statusUpdateCharacteristic = BleService.findCharacteristic(
-        //   _smartyService!,
-        //   BleService.statusUpdateUuid,
-        // );
-
-        // print("✅ BleManager: Cached characteristics:");
-        // print(
-        //   "  - Status: ${_statusCharacteristic != null ? 'Found' : 'Not found'}",
-        // );
-        // print(
-        //   "  - WiFi Scan: ${_wifiScanCharacteristic != null ? 'Found' : 'Not found'}",
-        // );
-        // print(
-        //   "  - WiFi Creds: ${_wifiCredsCharacteristic != null ? 'Found' : 'Not found'}",
-        // );
-        // print(
-        //   "  - User Data: ${_userDataCharacteristic != null ? 'Found' : 'Not found'}",
-        // );
-        // print(
-        //   "  - Status Update: ${_statusUpdateCharacteristic != null ? 'Found' : 'Not found'}",
-        // );
+      if (_smartyService == null) {
+        print("❌ BleManager: Smarty service not found among ${services.length} services");
+        return false;
       }
+
+      // Cache characteristics
+      _statusCharacteristic = BleService.findCharacteristic(
+        _smartyService!,
+        "ab04",
+      );
+      _wifiScanCharacteristic = BleService.findCharacteristic(
+        _smartyService!,
+        "ab01",
+      );
+      _wifiCredsCharacteristic = BleService.findCharacteristic(
+        _smartyService!,
+        "ab02",
+      );
+      _userDataCharacteristic = BleService.findCharacteristic(
+        _smartyService!,
+        "ab03",
+      );
+
+      print("📋 BleManager: Characteristics — "
+          "status=${_statusCharacteristic != null ? 'OK' : 'MISSING'}, "
+          "wifiScan=${_wifiScanCharacteristic != null ? 'OK' : 'MISSING'}, "
+          "wifiCreds=${_wifiCredsCharacteristic != null ? 'OK' : 'MISSING'}, "
+          "userData=${_userDataCharacteristic != null ? 'OK' : 'MISSING'}");
+
+      // Require at least the status characteristic
+      if (_statusCharacteristic == null) {
+        print("❌ BleManager: Required status characteristic (ab04) not found");
+        return false;
+      }
+
+      return true;
     } catch (e) {
       print("❌ BleManager: Error discovering services: $e");
+      return false;
     }
   }
 
@@ -201,12 +215,15 @@ class BleManager {
         print("❌ BleManager: Error enabling status notifications: $e");
       });
 
+      // Cancel previous subscription to avoid accumulation
+      _statusNotificationSubscription?.cancel();
+
       // Variables for debouncing
       String lastStatusString = "";
       DateTime lastUpdateTime = DateTime.now();
 
       // Listen for notifications
-      _statusCharacteristic!.lastValueStream.listen((value) {
+      _statusNotificationSubscription = _statusCharacteristic!.lastValueStream.listen((value) {
         if (value.isEmpty) {
           // print("⚠️ BleManager: Received empty status notification");
           return;
@@ -696,6 +713,10 @@ class BleManager {
 
   // Dispose resources
   void dispose() {
+    _connectionStateSubscription?.cancel();
+    _connectionStateSubscription = null;
+    _statusNotificationSubscription?.cancel();
+    _statusNotificationSubscription = null;
     // Close stream controllers
     _wifiStatusController.close();
     _batteryStatusController.close();

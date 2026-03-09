@@ -23,7 +23,6 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   StreamSubscription? _batteryStatusSubscription;
   StreamSubscription? _showSnackBarSubscription;
   bool _isConnectingDevice = false;
-  BluetoothDevice? _connectedDevice;
 
   @override
   void initState() {
@@ -37,9 +36,6 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       if (!mounted) return;
       setState(() {
         _connectedWifi = wifiName;
-        if (wifiName == "NotConnected") {
-          _connectedDevice = null;
-        }
       });
     });
 
@@ -76,14 +72,13 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     if (_bleManager.isConnected) {
       // Device already connected via BLE manager
       setState(() {
-        _connectedDevice = _bleManager.connectedDevice;
         _connectedWifi = _bleManager.connectedWifi;
         _batteryLevel = _bleManager.batteryLevel.toString();
         _isConnectingDevice = false;
       });
       // Fetch status updates in background if needed
       if (_connectedWifi == "Unknown" || _batteryLevel == "Unknown") {
-        _fetchStatusInBackground(_bleManager.connectedDevice!);
+        _fetchStatusInBackground();
       }
     } else {
       // Check for connected devices without assuming connection attempt
@@ -103,12 +98,12 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       if (connectedDevices.isNotEmpty) {
         for (BluetoothDevice device in connectedDevices) {
           if (device.platformName.toLowerCase().contains("smarty")) {
-            _bleManager.initialize(device);
+            await _bleManager.initialize(device);
+            if (!mounted) return;
             setState(() {
-              _connectedDevice = device;
               _isConnectingDevice = false;
             });
-            _fetchStatusInBackground(device);
+            _fetchStatusInBackground();
             return;
           }
         }
@@ -121,33 +116,30 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
       if (restored) {
         setState(() {
-          _connectedDevice = _bleManager.connectedDevice;
           _connectedWifi = _bleManager.connectedWifi;
           _batteryLevel = _bleManager.batteryLevel.toString();
           _isConnectingDevice = false;
         });
         // Fetch status updates in background if needed
         if (_connectedWifi == "Unknown" || _batteryLevel == "Unknown") {
-          _fetchStatusInBackground(_bleManager.connectedDevice!);
+          _fetchStatusInBackground();
         }
       } else {
         // No device found, show disconnected view immediately
         setState(() {
-          _connectedDevice = null;
           _isConnectingDevice = false;
         });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          _connectedDevice = null;
           _isConnectingDevice = false;
         });
       }
     }
   }
 
-  Future<void> _fetchStatusInBackground(BluetoothDevice device) async {
+  Future<void> _fetchStatusInBackground() async {
     try {
       // Skip if we already have valid status data
       if (_connectedWifi != "Unknown" && _batteryLevel != "Unknown") {
@@ -178,7 +170,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    bool isDeviceConnected = _bleManager.isConnected || _connectedDevice != null;
+    bool isDeviceConnected = _bleManager.isConnected;
 
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),

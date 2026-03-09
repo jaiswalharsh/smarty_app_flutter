@@ -130,44 +130,52 @@ class BleService {
   // Scan for BLE devices with "Smarty" in the name with Bluetooth check and prompt
   static Stream<List<ScanResult>> scanForSmartyDevicesWithPrompt(BuildContext context) {
     StreamController<List<ScanResult>> controller = StreamController<List<ScanResult>>();
-    
-    ensureBluetoothEnabled(context).then((isEnabled) {
-      if (!isEnabled) {
-        print("⚠️ Bluetooth is not enabled after prompt. Cannot scan.");
-        controller.add([]);
-        controller.close();
-        return;
+
+    () async {
+      try {
+        bool isEnabled = await ensureBluetoothEnabled(context);
+        if (!isEnabled) {
+          print("⚠️ Bluetooth is not enabled after prompt. Cannot scan.");
+          controller.add([]);
+          return;
+        }
+        await _performScan(controller);
+      } catch (e) {
+        print("❌ Error in scanForSmartyDevicesWithPrompt: $e");
+      } finally {
+        if (!controller.isClosed) controller.close();
       }
-      
-      // Continue with scanning since Bluetooth is enabled
-      _performScan(controller);
-    });
-    
+    }();
+
     return controller.stream;
   }
 
   // Scan for BLE devices with "Smarty" in the name
   static Stream<List<ScanResult>> scanForSmartyDevices() {
     StreamController<List<ScanResult>> controller = StreamController<List<ScanResult>>();
-    
-    isBluetoothReady().then((isReady) {
-      if (!isReady) {
-        print("⚠️ Bluetooth is not ready for scanning");
-        
-        // Try native Bluetooth enabling if we have a global context
-        if (_globalContext != null && _globalContext!.mounted) {
-          // Just trigger the system prompt directly
-          FlutterBluePlus.turnOn();
+
+    () async {
+      try {
+        bool isReady = await isBluetoothReady();
+        if (!isReady) {
+          print("⚠️ Bluetooth is not ready for scanning");
+
+          // Try native Bluetooth enabling if we have a global context
+          if (_globalContext != null && _globalContext!.mounted) {
+            FlutterBluePlus.turnOn();
+          }
+
+          controller.add([]);
+          return;
         }
-        
-        controller.add([]);
-        controller.close();
-        return;
+        await _performScan(controller);
+      } catch (e) {
+        print("❌ Error in scanForSmartyDevices: $e");
+      } finally {
+        if (!controller.isClosed) controller.close();
       }
-      
-      _performScan(controller);
-    });
-    
+    }();
+
     return controller.stream;
   }
   
@@ -207,39 +215,41 @@ class BleService {
     await FlutterBluePlus.stopScan();
   }
   
-  // Helper method to perform the scan
-  static void _performScan(StreamController<List<ScanResult>> controller) {
-    // Stop any ongoing scan first
-    FlutterBluePlus.stopScan().then((_) {
+  // Helper method to perform the scan. Controller is closed by the caller.
+  static Future<void> _performScan(StreamController<List<ScanResult>> controller) async {
+    StreamSubscription? subscription;
+    try {
+      // Stop any ongoing scan first
+      await FlutterBluePlus.stopScan();
+
       // Then start a new scan
-      FlutterBluePlus.startScan(timeout: const Duration(seconds: 4)).then((_) {
-        print("✅ Started scanning for BLE devices");
-        
-        // Subscribe to scan results
-        var subscription = FlutterBluePlus.scanResults.listen((results) {
-          final smartyResults = results
-              .where(
-                (result) =>
-                    result.device.platformName.isNotEmpty &&
-                    result.device.platformName.toLowerCase().contains("smarty"),
-              )
-              .toList();
-          
-          // Log found devices for debugging
-          if (smartyResults.isNotEmpty) {
-            print("🔍 Found ${smartyResults.length} Smarty devices in this scan");
-          }
-          
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+      print("✅ Started scanning for BLE devices");
+
+      // Subscribe to scan results
+      subscription = FlutterBluePlus.scanResults.listen((results) {
+        final smartyResults = results
+            .where(
+              (result) =>
+                  result.device.platformName.isNotEmpty &&
+                  result.device.platformName.toLowerCase().contains("smarty"),
+            )
+            .toList();
+
+        if (smartyResults.isNotEmpty) {
+          print("🔍 Found ${smartyResults.length} Smarty devices in this scan");
+        }
+
+        if (!controller.isClosed) {
           controller.add(smartyResults);
-        });
-        
-        // Close the controller when the scan is done
-        Future.delayed(const Duration(seconds: 5), () {
-          subscription.cancel();
-          controller.close();
-        });
+        }
       });
-    });
+
+      // Wait for scan to complete
+      await Future.delayed(const Duration(seconds: 5));
+    } finally {
+      subscription?.cancel();
+    }
   }
 
   // Stop scanning
