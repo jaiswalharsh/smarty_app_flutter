@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'home_tab.dart'; 
-import 'settings_tab.dart'; 
+import 'home_tab.dart';
+import 'settings_tab.dart';
 import 'utils/theme_provider.dart';
 import 'services/ble_service.dart';
+import 'services/ble_manager.dart';
 
 void main() {
   // Ensure Flutter is initialized
@@ -177,24 +178,39 @@ class MyHomePage extends StatefulWidget {
   _MyHomePageState createState() => _MyHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
+class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   int _currentIndex = 0;
 
   final List<Widget> _tabs = [
-    HomeTab(), 
-    SettingsTab(), 
+    HomeTab(),
+    SettingsTab(),
   ];
 
   @override
   void initState() {
     super.initState();
-    
+    WidgetsBinding.instance.addObserver(this);
+
     // Initialize BleService with context after the first frame is built
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         BleService.initialize(context);
       }
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    BleManager().dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      BleManager().dispose();
+    }
   }
 
   @override

@@ -19,7 +19,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   bool _isScanning = false;
   bool _isCheckingConnectedDevices = true;
   StreamSubscription? _showSnackBarSubscription;
-  StreamSubscription? _deviceConnectionSubscription;
+  StreamSubscription? _wifiStatusSubscription;
   String _scanningStatus = '';
   final List<BluetoothDevice> _discoveredDevices = [];
 
@@ -44,32 +44,22 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       ).showSnackBar(SnackBar(content: Text(message)));
     });
 
-    _subscribeToConnectionChanges();
+    _wifiStatusSubscription = _bleManager.wifiStatusStream.listen((status) {
+      if (status == "NotConnected" && mounted) {
+        setState(() {
+          _devices = [];
+          _connectionResult = 'Device disconnected';
+        });
+        _checkForConnectedSmartyDevice();
+      }
+    });
   }
 
   @override
   void dispose() {
     _showSnackBarSubscription?.cancel();
-    _deviceConnectionSubscription?.cancel();
+    _wifiStatusSubscription?.cancel();
     super.dispose();
-  }
-
-  void _subscribeToConnectionChanges() {
-    if (_bleManager.connectedDevice != null) {
-      _deviceConnectionSubscription?.cancel();
-      _deviceConnectionSubscription = _bleManager
-          .connectedDevice!
-          .connectionState
-          .listen((state) {
-            if (state == BluetoothConnectionState.disconnected) {
-              setState(() {
-                _devices = [];
-                _connectionResult = 'Device disconnected';
-              });
-              _checkForConnectedSmartyDevice();
-            }
-          });
-    }
   }
 
   Future<void> _checkForConnectedSmartyDevice() async {
@@ -119,7 +109,6 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       for (BluetoothDevice device in connectedDevices) {
         if (device.platformName.toLowerCase().contains("smarty")) {
           await _bleManager.initialize(device);
-          _subscribeToConnectionChanges();
           setState(() {
             _isCheckingConnectedDevices = false;
             _connectionResult = 'Connected to ${device.platformName}';
@@ -239,7 +228,6 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
 
       if (connectionSuccessful) {
         await _bleManager.initialize(device);
-        _subscribeToConnectionChanges();
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

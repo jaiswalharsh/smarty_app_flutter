@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../../services/ble_manager.dart';
 import 'wifi_network_page.dart';
 
@@ -25,7 +24,6 @@ class WifiConfigPageState extends State<WifiConfigPage> {
   StreamSubscription? _wifiStatusSubscription;
   StreamSubscription? _wifiStatusMessageSubscription;
   StreamSubscription? _showSnackBarSubscription;
-  StreamSubscription? _deviceConnectionSubscription;
 
   @override
   void initState() {
@@ -53,9 +51,6 @@ class WifiConfigPageState extends State<WifiConfigPage> {
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
     });
-    
-    // Listen for device connection state changes
-    _subscribeToConnectionChanges();
   }
 
   @override
@@ -63,32 +58,9 @@ class WifiConfigPageState extends State<WifiConfigPage> {
     _wifiStatusSubscription?.cancel();
     _wifiStatusMessageSubscription?.cancel();
     _showSnackBarSubscription?.cancel();
-    _deviceConnectionSubscription?.cancel();
     super.dispose();
   }
   
-  // Subscribe to device connection state changes
-  void _subscribeToConnectionChanges() {
-    if (_bleManager.connectedDevice != null) {
-      // Cancel any existing subscription
-      _deviceConnectionSubscription?.cancel();
-      
-      // Subscribe to connection state changes
-      _deviceConnectionSubscription = _bleManager.connectedDevice!.connectionState.listen((state) {
-        print("💡 Device connection state changed: $state");
-        if (state == BluetoothConnectionState.disconnected) {
-          print("❌ Device disconnected");
-          
-          // Navigate back to device connection page on disconnect
-          _navigateToDeviceConnectionPage();
-        }
-      });
-    } else {
-      // No device connected, go back to connection page
-      _navigateToDeviceConnectionPage();
-    }
-  }
-
   // Initialize WiFi configuration page
   Future<void> _initializeWifiConfig() async {
     setState(() {

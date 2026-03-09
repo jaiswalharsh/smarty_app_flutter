@@ -18,8 +18,6 @@ class _SettingsTabState extends State<SettingsTab> {
   // BLE manager
   final BleManager _bleManager = BleManager();
 
-  bool _isDeviceConnected = false;
-
   // Stream subscription
   StreamSubscription? _wifiStatusSubscription;
   StreamSubscription? _deviceConnectionSubscription;
@@ -29,24 +27,19 @@ class _SettingsTabState extends State<SettingsTab> {
   void initState() {
     super.initState();
 
-    // Get the current connection state instead of running a check
-    _isDeviceConnected = _bleManager.isConnected;
-
     // Set up listeners for device status changes
     _setupStatusListeners();
   }
 
   // Set up status listeners
   void _setupStatusListeners() {
-    // Listen for device connection state changes
+    // Listen for device connection state changes — triggers rebuild so
+    // build() re-reads _bleManager.isConnected
     _deviceConnectionSubscription = _bleManager.wifiStatusStream.listen((
       status,
     ) {
       if (mounted) {
-        setState(() {
-          // Use the current connection state from the manager
-          _isDeviceConnected = _bleManager.isConnected;
-        });
+        setState(() {});
       }
     });
 
@@ -60,16 +53,6 @@ class _SettingsTabState extends State<SettingsTab> {
         ).showSnackBar(SnackBar(content: Text(message)));
       }
     });
-  }
-
-  // Check device connection state (called when returning from navigation)
-  void _checkDeviceConnection() {
-    // Only update if the connection state has changed
-    if (_isDeviceConnected != _bleManager.isConnected) {
-      setState(() {
-        _isDeviceConnected = _bleManager.isConnected;
-      });
-    }
   }
 
   @override
@@ -165,7 +148,7 @@ class _SettingsTabState extends State<SettingsTab> {
                   },
                 ),
                 SizedBox(height: 16),
-                _isDeviceConnected
+                _bleManager.isConnected
                     ? _buildWifiConfigCard()
                     : _buildConnectDeviceCard(),
                 SizedBox(height: 16),
@@ -286,8 +269,8 @@ class _SettingsTabState extends State<SettingsTab> {
           context,
           MaterialPageRoute(builder: (context) => WifiConfigPage()),
         ).then((_) {
-          // Refresh state when returning from WiFi config page
-          _checkDeviceConnection();
+          // Refresh state when returning from navigation
+          if (mounted) setState(() {});
         });
       },
     );
@@ -309,8 +292,8 @@ class _SettingsTabState extends State<SettingsTab> {
           context,
           MaterialPageRoute(builder: (context) => SmartyConnectionPage()),
         ).then((_) {
-          // Refresh state when returning from WiFi config page
-          _checkDeviceConnection();
+          // Refresh state when returning from navigation
+          if (mounted) setState(() {});
         });
       },
     );
