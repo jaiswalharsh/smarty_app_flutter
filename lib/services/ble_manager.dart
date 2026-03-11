@@ -81,6 +81,14 @@ class BleManager {
     _connectedDevice = device;
     print("🔄 BleManager: Initializing with device: ${device.platformName}");
 
+    // Request larger MTU for WiFi scan chunks and JSON status notifications
+    try {
+      await device.requestMtu(512);
+      print("✅ BleManager: MTU negotiated");
+    } catch (e) {
+      print("⚠️ BleManager: MTU request failed: $e");
+    }
+
     // Discover services
     bool servicesReady = await _discoverServices();
 
