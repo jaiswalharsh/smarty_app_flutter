@@ -26,6 +26,12 @@ class BleManager {
   // Connected device
   BluetoothDevice? _connectedDevice;
 
+  // Guards against concurrent auto-reconnect attempts
+  bool _isAutoReconnecting = false;
+
+  // Guards against concurrent initialize() calls
+  Completer<void>? _initializeLock;
+
   // Cached services
   BluetoothService? _smartyService;
 
@@ -84,48 +90,60 @@ class BleManager {
       return;
     }
 
-    _connectedDevice = device;
-    print("🔄 BleManager: Initializing with device: ${device.platformName}");
-
-    // Request larger MTU for WiFi scan chunks and JSON status notifications
-    try {
-      await device.requestMtu(512);
-      print("✅ BleManager: MTU negotiated");
-    } catch (e) {
-      print("⚠️ BleManager: MTU request failed: $e");
-    }
-
-    // Trigger bonding on Android (prevents double pairing popup bug)
-    // iOS handles bonding automatically when encrypted characteristics are accessed
-    if (Platform.isAndroid) {
-      try {
-        await device.createBond();
-        print("BleManager: Bond created/confirmed on Android");
-      } catch (e) {
-        print("BleManager: Bond creation skipped (may already be bonded): $e");
-      }
-    }
-
-    // Discover services
-    bool servicesReady = await _discoverServices();
-
-    if (!servicesReady) {
-      print("❌ BleManager: Service discovery failed — required services/characteristics not found");
-      _showSnackBarController.add("Device missing required Smarty service");
-      _resetConnectionState();
+    // Serialize concurrent initialize() calls
+    if (_initializeLock != null) {
+      await _initializeLock!.future;
       return;
     }
+    _initializeLock = Completer<void>();
 
-    // Set up status updates
-    if (_statusCharacteristic != null) {
-      _setupStatusUpdates();
+    try {
+      _connectedDevice = device;
+      print("🔄 BleManager: Initializing with device: ${device.platformName}");
+
+      // Request larger MTU for WiFi scan chunks and JSON status notifications
+      try {
+        await device.requestMtu(512);
+        print("✅ BleManager: MTU negotiated");
+      } catch (e) {
+        print("⚠️ BleManager: MTU request failed: $e");
+      }
+
+      // Trigger bonding on Android (prevents double pairing popup bug)
+      // iOS handles bonding automatically when encrypted characteristics are accessed
+      if (Platform.isAndroid) {
+        try {
+          await device.createBond();
+          print("BleManager: Bond created/confirmed on Android");
+        } catch (e) {
+          print("BleManager: Bond creation skipped (may already be bonded): $e");
+        }
+      }
+
+      // Discover services
+      bool servicesReady = await _discoverServices();
+
+      if (!servicesReady) {
+        print("❌ BleManager: Service discovery failed — required services/characteristics not found");
+        _showSnackBarController.add("Device missing required Smarty service");
+        _resetConnectionState();
+        return;
+      }
+
+      // Set up status updates
+      if (_statusCharacteristic != null) {
+        _setupStatusUpdates();
+      }
+
+      // Set up connection state monitoring
+      _monitorDeviceConnection();
+
+      // Persist device ID for auto-reconnect on next app launch
+      _saveDeviceId(device);
+    } finally {
+      _initializeLock!.complete();
+      _initializeLock = null;
     }
-
-    // Set up connection state monitoring
-    _monitorDeviceConnection();
-
-    // Persist device ID for auto-reconnect on next app launch
-    _saveDeviceId(device);
   }
 
   // Monitor device connection state
@@ -166,29 +184,36 @@ class BleManager {
   
   // Attempt to auto-reconnect after a mid-session disconnect
   void _attemptAutoReconnect() async {
-    // Wait a few seconds for the device to power back on and start advertising
-    await Future.delayed(const Duration(seconds: 3));
+    if (_isAutoReconnecting) return;
+    _isAutoReconnecting = true;
 
-    // Don't reconnect if something else already reconnected
-    if (_connectedDevice != null) return;
+    try {
+      // Wait a few seconds for the device to power back on and start advertising
+      await Future.delayed(const Duration(seconds: 3));
 
-    print("🔄 BleManager: Attempting auto-reconnect after disconnect...");
-    final success = await autoReconnectToSavedDevice();
-    if (success) {
-      print("✅ BleManager: Auto-reconnect succeeded");
-      _wifiStatusController.add(_connectedWifi);
-      _showSnackBarController.add("Reconnected to ${_connectedDevice?.platformName ?? 'Smarty'}");
-    } else {
-      print("❌ BleManager: Auto-reconnect failed, will retry in 10s");
-      // Retry once more after a longer delay (device may still be booting)
-      await Future.delayed(const Duration(seconds: 10));
+      // Don't reconnect if something else already reconnected
       if (_connectedDevice != null) return;
-      final retrySuccess = await autoReconnectToSavedDevice();
-      if (retrySuccess) {
-        print("✅ BleManager: Auto-reconnect succeeded on retry");
+
+      print("🔄 BleManager: Attempting auto-reconnect after disconnect...");
+      final success = await autoReconnectToSavedDevice();
+      if (success) {
+        print("✅ BleManager: Auto-reconnect succeeded");
         _wifiStatusController.add(_connectedWifi);
         _showSnackBarController.add("Reconnected to ${_connectedDevice?.platformName ?? 'Smarty'}");
+      } else {
+        print("❌ BleManager: Auto-reconnect failed, will retry in 10s");
+        // Retry once more after a longer delay (device may still be booting)
+        await Future.delayed(const Duration(seconds: 10));
+        if (_connectedDevice != null) return;
+        final retrySuccess = await autoReconnectToSavedDevice();
+        if (retrySuccess) {
+          print("✅ BleManager: Auto-reconnect succeeded on retry");
+          _wifiStatusController.add(_connectedWifi);
+          _showSnackBarController.add("Reconnected to ${_connectedDevice?.platformName ?? 'Smarty'}");
+        }
       }
+    } finally {
+      _isAutoReconnecting = false;
     }
   }
 
@@ -586,6 +611,7 @@ class BleManager {
       return [];
     }
 
+    StreamSubscription<List<int>>? subscription;
     try {
       // Set up a completer to wait for scan results
       Completer<List<String>> completer = Completer<List<String>>();
@@ -597,7 +623,6 @@ class BleManager {
       await _wifiScanCharacteristic!.setNotifyValue(true);
 
       // Listen for notifications
-      StreamSubscription<List<int>>? subscription;
       subscription = _wifiScanCharacteristic!.lastValueStream.listen((value) {
         if (value.isEmpty) return;
 
@@ -679,8 +704,12 @@ class BleManager {
         }
       });
 
-      return completer.future;
+      // Guarantee subscription cleanup when completer resolves (any path)
+      return completer.future.whenComplete(() {
+        subscription?.cancel();
+      });
     } catch (e) {
+      subscription?.cancel();
       print("❌ BleManager: Error scanning for WiFi networks: $e");
       return [];
     }
