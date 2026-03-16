@@ -102,6 +102,18 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         return;
       }
 
+      // Try auto-reconnect to saved device
+      bool autoReconnected = await _bleManager.autoReconnectToSavedDevice();
+      if (autoReconnected && _bleManager.connectedDevice != null) {
+        setState(() {
+          _isCheckingConnectedDevices = false;
+          _connectionResult =
+              'Connected to ${_bleManager.connectedDevice?.platformName ?? "Smarty device"}';
+        });
+        _handleConnectionSuccess(_bleManager.connectedDevice!);
+        return;
+      }
+
       // Use the regular method since we already checked Bluetooth status
       List<BluetoothDevice> connectedDevices =
           await BleService.getConnectedDevices();

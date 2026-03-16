@@ -109,7 +109,28 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         }
       }
 
-      // Try restoring connection only if there's a reasonable chance (e.g., after hot restart)
+      // Try auto-reconnect to saved device (ESP32 should be advertising in reconnect mode)
+      String? savedDeviceId = await _bleManager.getSavedDeviceId();
+      if (savedDeviceId != null) {
+        if (mounted) {
+          setState(() {
+            _isConnectingDevice = true;
+          });
+        }
+        bool autoReconnected = await _bleManager.autoReconnectToSavedDevice();
+        if (autoReconnected && _bleManager.connectedDevice != null) {
+          if (!mounted) return;
+          setState(() {
+            _connectedWifi = _bleManager.connectedWifi;
+            _batteryLevel = _bleManager.batteryLevel.toString();
+            _isConnectingDevice = false;
+          });
+          _fetchStatusInBackground();
+          return;
+        }
+      }
+
+      // Fall back to restoring connection (e.g., after hot restart)
       bool restored = await _bleManager.restoreConnectionsAfterHotRestart();
 
       if (!mounted) return;

@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/wifi_utils.dart';
 import 'ble_service.dart';
 
 // A singleton class to manage BLE connections and data
 class BleManager {
+  // Saved device persistence keys
+  static const String _savedDeviceIdKey = 'smarty_saved_device_id';
+  static const String _savedDeviceNameKey = 'smarty_saved_device_name';
+
   // Singleton instance
   static final BleManager _instance = BleManager._internal();
 
@@ -106,6 +111,9 @@ class BleManager {
 
     // Set up connection state monitoring
     _monitorDeviceConnection();
+
+    // Persist device ID for auto-reconnect on next app launch
+    _saveDeviceId(device);
   }
 
   // Monitor device connection state
@@ -129,18 +137,49 @@ class BleManager {
         }
       } else if (state == BluetoothConnectionState.disconnected) {
         print("❌ Device disconnected from BLE manager");
-        
+
         // Reset the device and service references
         _resetConnectionState();
-        
+
         // Notify listeners about the disconnection
         _wifiStatusController.add("NotConnected");
         _wifiStatusMessageController.add("Device disconnected");
         _showSnackBarController.add("Device disconnected");
+
+        // Attempt auto-reconnect if we have a saved device
+        _attemptAutoReconnect();
       }
     });
   }
   
+  // Attempt to auto-reconnect after a mid-session disconnect
+  void _attemptAutoReconnect() async {
+    // Wait a few seconds for the device to power back on and start advertising
+    await Future.delayed(const Duration(seconds: 3));
+
+    // Don't reconnect if something else already reconnected
+    if (_connectedDevice != null) return;
+
+    print("🔄 BleManager: Attempting auto-reconnect after disconnect...");
+    final success = await autoReconnectToSavedDevice();
+    if (success) {
+      print("✅ BleManager: Auto-reconnect succeeded");
+      _wifiStatusController.add(_connectedWifi);
+      _showSnackBarController.add("Reconnected to ${_connectedDevice?.platformName ?? 'Smarty'}");
+    } else {
+      print("❌ BleManager: Auto-reconnect failed, will retry in 10s");
+      // Retry once more after a longer delay (device may still be booting)
+      await Future.delayed(const Duration(seconds: 10));
+      if (_connectedDevice != null) return;
+      final retrySuccess = await autoReconnectToSavedDevice();
+      if (retrySuccess) {
+        print("✅ BleManager: Auto-reconnect succeeded on retry");
+        _wifiStatusController.add(_connectedWifi);
+        _showSnackBarController.add("Reconnected to ${_connectedDevice?.platformName ?? 'Smarty'}");
+      }
+    }
+  }
+
   // Reset the connection state when device is disconnected
   void _resetConnectionState() {
     _connectionStateSubscription?.cancel();
@@ -718,6 +757,82 @@ class BleManager {
     
     print("⚠️ BleManager: Status update still empty after retries");
     return false;
+  }
+
+  // Save device ID for auto-reconnect
+  Future<void> _saveDeviceId(BluetoothDevice device) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_savedDeviceIdKey, device.remoteId.str);
+    await prefs.setString(_savedDeviceNameKey, device.platformName);
+    print("BleManager: Saved device for auto-reconnect: ${device.platformName} (${device.remoteId.str})");
+  }
+
+  // Get saved device ID
+  Future<String?> getSavedDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_savedDeviceIdKey);
+  }
+
+  // Clear saved device
+  Future<void> clearSavedDevice() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_savedDeviceIdKey);
+    await prefs.remove(_savedDeviceNameKey);
+    print("BleManager: Cleared saved device");
+  }
+
+  // Disconnect and forget the saved device
+  Future<void> disconnectAndForget() async {
+    try {
+      if (_connectedDevice != null) {
+        await _connectedDevice!.disconnect();
+      }
+    } catch (e) {
+      print("BleManager: Error disconnecting: $e");
+    }
+    _resetConnectionState();
+    await clearSavedDevice();
+    _wifiStatusController.add("NotConnected");
+    _wifiStatusMessageController.add("Device forgotten");
+  }
+
+  // Auto-reconnect to previously saved device
+  Future<bool> autoReconnectToSavedDevice() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedId = prefs.getString(_savedDeviceIdKey);
+      final savedName = prefs.getString(_savedDeviceNameKey) ?? "Smarty";
+
+      if (savedId == null) {
+        return false;
+      }
+
+      print("BleManager: Attempting auto-reconnect to $savedName ($savedId)");
+
+      final device = BluetoothDevice.fromId(savedId);
+
+      // Check if already connected at OS level
+      if ((await device.connectionState.first) == BluetoothConnectionState.connected) {
+        print("BleManager: Device already connected, initializing...");
+        await initialize(device);
+        return _smartyService != null;
+      }
+
+      // Connect with autoConnect for low-power background reconnect
+      await device.connect(autoConnect: true, mtu: null);
+
+      // Verify we're connected
+      if ((await device.connectionState.first) == BluetoothConnectionState.connected) {
+        print("BleManager: Auto-reconnect successful to $savedName");
+        await initialize(device);
+        return _smartyService != null;
+      }
+
+      return false;
+    } catch (e) {
+      print("BleManager: Auto-reconnect failed: $e");
+      return false;
+    }
   }
 
   // Dispose resources

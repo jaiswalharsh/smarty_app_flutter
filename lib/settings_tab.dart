@@ -149,6 +149,10 @@ class _SettingsTabState extends State<SettingsTab> {
                 _bleManager.isConnected
                     ? _buildWifiConfigCard()
                     : _buildConnectDeviceCard(),
+                if (_bleManager.isConnected) ...[
+                  SizedBox(height: 16),
+                  _buildForgetDeviceCard(),
+                ],
                 SizedBox(height: 16),
                 _buildSettingsCard(
                   title: "About Smarty",
@@ -270,6 +274,69 @@ class _SettingsTabState extends State<SettingsTab> {
           // Refresh state when returning from navigation
           if (mounted) setState(() {});
         });
+      },
+    );
+  }
+
+  // Card for forgetting the saved device
+  Widget _buildForgetDeviceCard() {
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+
+    return _buildSettingsCard(
+      title: "Forget Device",
+      description: "Remove saved device and disconnect",
+      icon: Icons.link_off,
+      iconColor: themeProvider.isDarkMode ? Color(0xFFFF5252) : Colors.red,
+      bgColor:
+          themeProvider.isDarkMode ? Color(0xFF2C2C44) : Colors.red.shade50,
+      onTap: () {
+        _showForgetDeviceDialog();
+      },
+    );
+  }
+
+  // Forget device confirmation dialog
+  void _showForgetDeviceDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.link_off, color: Colors.red, size: 24),
+              SizedBox(width: 8),
+              Text("Forget Device"),
+            ],
+          ),
+          content: Text(
+            "This will disconnect and remove the saved Smarty device. You will need to re-pair using the button combo on the device.",
+            style: TextStyle(fontSize: 16),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text("Cancel"),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await _bleManager.disconnectAndForget();
+                if (mounted) setState(() {});
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: Text("Forget"),
+            ),
+          ],
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        );
       },
     );
   }
