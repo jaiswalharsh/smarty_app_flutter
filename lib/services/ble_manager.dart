@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/wifi_utils.dart';
@@ -92,6 +93,17 @@ class BleManager {
       print("✅ BleManager: MTU negotiated");
     } catch (e) {
       print("⚠️ BleManager: MTU request failed: $e");
+    }
+
+    // Trigger bonding on Android (prevents double pairing popup bug)
+    // iOS handles bonding automatically when encrypted characteristics are accessed
+    if (Platform.isAndroid) {
+      try {
+        await device.createBond();
+        print("BleManager: Bond created/confirmed on Android");
+      } catch (e) {
+        print("BleManager: Bond creation skipped (may already be bonded): $e");
+      }
     }
 
     // Discover services
@@ -785,6 +797,15 @@ class BleManager {
   Future<void> disconnectAndForget() async {
     try {
       if (_connectedDevice != null) {
+        // Remove OS-level bond on Android (iOS manages bonds internally)
+        if (Platform.isAndroid) {
+          try {
+            await _connectedDevice!.removeBond();
+            print("BleManager: Bond removed on Android");
+          } catch (e) {
+            print("BleManager: Bond removal failed: $e");
+          }
+        }
         await _connectedDevice!.disconnect();
       }
     } catch (e) {
@@ -819,10 +840,15 @@ class BleManager {
       }
 
       // Connect with autoConnect for low-power background reconnect
+      // autoConnect returns immediately — must wait for actual connection via stream
       await device.connect(autoConnect: true, mtu: null);
 
-      // Verify we're connected
-      if ((await device.connectionState.first) == BluetoothConnectionState.connected) {
+      final connected = await device.connectionState
+          .firstWhere((s) => s == BluetoothConnectionState.connected)
+          .timeout(const Duration(seconds: 15),
+              onTimeout: () => BluetoothConnectionState.disconnected);
+
+      if (connected == BluetoothConnectionState.connected) {
         print("BleManager: Auto-reconnect successful to $savedName");
         await initialize(device);
         return _smartyService != null;
