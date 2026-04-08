@@ -88,17 +88,10 @@ class WifiConfigPageState extends State<WifiConfigPage> {
 
   // Navigate to WiFi network page
   Future<void> _navigateToWifiNetworkPage() async {
-    if (_bleManager.isConnected && _bleManager.smartyService != null) {
-      // Navigate to WiFi configuration page
+    if (_bleManager.isConnected) {
       Navigator.push(
         context,
-        MaterialPageRoute(
-          builder:
-              (context) => WifiNetworkPage(
-                service: _bleManager.smartyService!,
-                device: _bleManager.connectedDevice!,
-              ),
-        ),
+        MaterialPageRoute(builder: (context) => WifiNetworkPage()),
       );
     } else {
       setState(() {

@@ -70,19 +70,15 @@ class BleManager {
       _wifiStatusMessageController.stream;
   Stream<String> get showSnackBarStream => _showSnackBarController.stream;
   bool get isConnected => _connectedDevice != null;
+  // Non-connected statuses from ESP32 (wifi_config.c) and Flutter internals
+  static const _nonConnectedStatuses = {
+    '', 'Unknown', 'NotConnected', 'Initializing',
+    'Auth Failed', 'Connection Failed', 'No credentials', 'Reconnecting',
+  };
   bool get isWifiConnected =>
       _connectedWifi.trim().isNotEmpty &&
-      _connectedWifi != "Unknown" &&
-      _connectedWifi != "NotConnected" &&
-      _connectedWifi != "Init" &&
-      _connectedWifi != "Initializing" &&
-      _connectedWifi != "Auth Failed" &&
-      _connectedWifi != "AuthFailed" &&
-      _connectedWifi != "Reset Failed" &&
-      _connectedWifi != "No credentials" &&
-      _connectedWifi != "Connection Failed" &&
-      _connectedWifi != "Reconnecting" &&
-      !_connectedWifi.contains("Failed");
+      !_nonConnectedStatuses.contains(_connectedWifi) &&
+      !_connectedWifi.contains('Failed');
 
   // Initialize the manager with a connected device
   Future<void> initialize(BluetoothDevice device) async {
