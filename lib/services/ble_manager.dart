@@ -137,8 +137,11 @@ class BleManager {
 
       // Persist device ID for auto-reconnect on next app launch
       _saveDeviceId(device);
-    } finally {
       _initializeLock!.complete();
+    } catch (e) {
+      _initializeLock!.completeError(e);
+      rethrow;
+    } finally {
       _initializeLock = null;
     }
   }
