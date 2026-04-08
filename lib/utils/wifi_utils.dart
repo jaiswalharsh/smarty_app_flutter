@@ -210,8 +210,11 @@ class WifiUtils {
           );
 
           // Wait for a short time to see if auth fails
-          await Future.delayed(Duration(seconds: 5));
-          subscription?.cancel();
+          try {
+            await Future.delayed(Duration(seconds: 5));
+          } finally {
+            subscription?.cancel();
+          }
           
           if (authFailed) {
             return false;

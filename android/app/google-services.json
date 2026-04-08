@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "6762233553",
+    "project_id": "smarty-7e350",
+    "storage_bucket": "smarty-7e350.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:6762233553:android:4822bd9f785a25a91c0ff0",
+        "android_client_info": {
+          "package_name": "com.example.smarty_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCS3GIkn410a5xHdXIS_sIwh0UN5R-oa1Y"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

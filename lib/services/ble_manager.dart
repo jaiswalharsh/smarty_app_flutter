@@ -40,7 +40,8 @@ class BleManager {
   BluetoothCharacteristic? _wifiScanCharacteristic;
   BluetoothCharacteristic? _wifiCredsCharacteristic;
   BluetoothCharacteristic? _userDataCharacteristic;
-  // BluetoothCharacteristic? _statusUpdateCharacteristic;
+  BluetoothCharacteristic? _deviceSecretCharacteristic;
+  BluetoothCharacteristic? _deviceInfoCharacteristic;
 
   // Connection state subscription
   StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
@@ -228,7 +229,8 @@ class BleManager {
     _wifiScanCharacteristic = null;
     _wifiCredsCharacteristic = null;
     _userDataCharacteristic = null;
-    // _statusUpdateCharacteristic = null;
+    _deviceSecretCharacteristic = null;
+    _deviceInfoCharacteristic = null;
     _connectedWifi = "NotConnected";
     _connectedDevice = null;
   }
@@ -265,12 +267,22 @@ class BleManager {
         _smartyService!,
         "ab03",
       );
+      _deviceSecretCharacteristic = BleService.findCharacteristic(
+        _smartyService!,
+        "ab05",
+      );
+      _deviceInfoCharacteristic = BleService.findCharacteristic(
+        _smartyService!,
+        "ab06",
+      );
 
       print("📋 BleManager: Characteristics — "
           "status=${_statusCharacteristic != null ? 'OK' : 'MISSING'}, "
           "wifiScan=${_wifiScanCharacteristic != null ? 'OK' : 'MISSING'}, "
           "wifiCreds=${_wifiCredsCharacteristic != null ? 'OK' : 'MISSING'}, "
-          "userData=${_userDataCharacteristic != null ? 'OK' : 'MISSING'}");
+          "userData=${_userDataCharacteristic != null ? 'OK' : 'MISSING'}, "
+          "deviceSecret=${_deviceSecretCharacteristic != null ? 'OK' : 'MISSING'}, "
+          "deviceInfo=${_deviceInfoCharacteristic != null ? 'OK' : 'MISSING'}");
 
       // Require at least the status characteristic
       if (_statusCharacteristic == null) {
@@ -559,6 +571,43 @@ class BleManager {
     }
   }
 
+  // Read device ID from ESP32 (MAC-derived hex string)
+  Future<String?> readDeviceId() async {
+    if (_deviceInfoCharacteristic == null) {
+      print("❌ BleManager: Device info characteristic (ab06) not found");
+      return null;
+    }
+
+    try {
+      List<int> data = await _deviceInfoCharacteristic!.read();
+      if (data.isEmpty) return null;
+      String deviceId = String.fromCharCodes(data);
+      print("BleManager: Read device ID: $deviceId");
+      return deviceId;
+    } catch (e) {
+      print("❌ BleManager: Error reading device ID: $e");
+      return null;
+    }
+  }
+
+  // Write device secret to ESP32 for Firebase registration
+  Future<bool> writeDeviceSecret(String secret) async {
+    if (_deviceSecretCharacteristic == null) {
+      print("❌ BleManager: Device secret characteristic (ab05) not found");
+      return false;
+    }
+
+    try {
+      List<int> value = utf8.encode(secret);
+      await _deviceSecretCharacteristic!.write(value, withoutResponse: false);
+      print("BleManager: Device secret written (${value.length} bytes)");
+      return true;
+    } catch (e) {
+      print("❌ BleManager: Error writing device secret: $e");
+      return false;
+    }
+  }
+
   // Connect to WiFi
   Future<bool> connectToWifi(String ssid, String password) async {
     if (_wifiCredsCharacteristic == null) {
@@ -689,8 +738,8 @@ class BleManager {
       await _wifiScanCharacteristic!.read();
       // print("📶 BleManager: Initial read completed to start notifications");
 
-      // Set a timeout
-      Timer(Duration(seconds: 15), () {
+      // Set a timeout (cancelled on completion via whenComplete below)
+      final scanTimer = Timer(Duration(seconds: 15), () {
         if (!completer.isCompleted) {
           print("⏱️ BleManager: WiFi scan timeout reached");
           if (networkEntries.isNotEmpty) {
@@ -704,8 +753,9 @@ class BleManager {
         }
       });
 
-      // Guarantee subscription cleanup when completer resolves (any path)
+      // Guarantee cleanup when completer resolves (any path)
       return completer.future.whenComplete(() {
+        scanTimer.cancel();
         subscription?.cancel();
       });
     } catch (e) {

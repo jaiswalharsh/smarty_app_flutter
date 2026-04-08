@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'home_tab.dart';
 import 'settings_tab.dart';
 import 'utils/theme_provider.dart';
 import 'services/ble_service.dart';
 import 'services/ble_manager.dart';
+import 'screens/auth/login_page.dart';
 
-void main() {
+void main() async {
   // Ensure Flutter is initialized
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(
     ChangeNotifierProvider(
       create: (_) => ThemeProvider(),
@@ -64,9 +69,14 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
     // Start animation and navigate after it completes
     _controller.forward().then((_) {
       Future.delayed(Duration(milliseconds: 500), () {
+        if (!mounted) return;
+        final isLoggedIn = FirebaseAuth.instance.currentUser != null;
+        final destination = isLoggedIn
+            ? MyHomePage()
+            : LoginPage();
         Navigator.of(context).pushReplacement(
           PageRouteBuilder(
-            pageBuilder: (context, animation, secondaryAnimation) => MyHomePage(),
+            pageBuilder: (context, animation, secondaryAnimation) => destination,
             transitionsBuilder: (context, animation, secondaryAnimation, child) {
               return FadeTransition(opacity: animation, child: child);
             },

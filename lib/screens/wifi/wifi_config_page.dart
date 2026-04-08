@@ -29,15 +29,15 @@ class WifiConfigPageState extends State<WifiConfigPage> {
 
     // Listen for WiFi status updates
     _wifiStatusSubscription = _bleManager.wifiStatusStream.listen((wifiName) {
+      if (!mounted) return;
       setState(() {
         _currentWifiName = wifiName;
-        
-        // If the device is disconnected, navigate back to connection page
-        if (wifiName == "NotConnected") {
-          print("📱 WifiConfigPage: Detected device disconnection");
-          _navigateToDeviceConnectionPage();
-        }
       });
+      // If the device is disconnected, navigate back to connection page
+      if (wifiName == "NotConnected") {
+        print("📱 WifiConfigPage: Detected device disconnection");
+        _navigateToDeviceConnectionPage();
+      }
     });
 
     // Listen for snackbar notifications
@@ -122,11 +122,20 @@ class WifiConfigPageState extends State<WifiConfigPage> {
   // Reset WiFi connection
   Future<void> _resetWifiConnection() async {
     bool success = await _bleManager.resetWifiConnection();
+    if (!mounted) return;
 
     if (success) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Successfully forgot WiFi network'))
       );
+      // Wait for device to process reset, then refresh status
+      await Future.delayed(Duration(milliseconds: 500));
+      await _bleManager.readStatusUpdate();
+      if (mounted) {
+        setState(() {
+          _currentWifiName = _bleManager.connectedWifi;
+        });
+      }
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to forget WiFi network'))
@@ -136,12 +145,8 @@ class WifiConfigPageState extends State<WifiConfigPage> {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      // Handle back button press
-      onWillPop: () async {
-        // Simply allow the pop to happen naturally
-        return true;
-      },
+    return PopScope(
+      canPop: true,
       child: GestureDetector(
         // Dismiss keyboard when tapping outside of text fields
         onTap: () {

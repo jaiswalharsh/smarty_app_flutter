@@ -79,17 +79,19 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         List<String> notifications = [];
         bool receivedTotalMarker = false;
         bool receivedEndMarker = false;
+        bool scanTriggered = false;
         int expectedNetworks = 0;
         int retryCount = 0;
-        
+
         // Listen for notifications using the value stream
         _wifiScanSubscription = wifiScanCharacteristic.lastValueStream.listen((value) {
-          if (value.isEmpty) {
-            // print("⚠️ Received empty notification data");
-            return;
-          }
-          
+          if (value.isEmpty) return;
+
           String notification = String.fromCharCodes(value);
+
+          // Ignore stale replayed values and SCAN echo before scan is triggered
+          if (!scanTriggered) return;
+          if (notification == "SCAN") return;
           // print("📶 Received notification: $notification");
           
           // Check if this is the TOTAL marker
@@ -127,8 +129,9 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
                     print("📡 Retry read completed");
                   } catch (e) {
                     print("⚠️ Error on retry read: $e");
-                    
+
                     // Show empty networks if retry fails
+                    if (!mounted) return;
                     setState(() {
                       _isScanningWifi = false;
                       _statusMessage = 'No WiFi networks found';
@@ -137,6 +140,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
                 });
               } else {
                 print("⚠️ Received END marker but no network data after retry");
+                if (!mounted) return;
                 setState(() {
                   _isScanningWifi = false;
                   _statusMessage = 'No WiFi networks found';
@@ -177,14 +181,16 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
           print("📡 Triggering WiFi scan on ESP32...");
           try {
             List<int> triggerValue = utf8.encode("SCAN");
-            await wifiScanCharacteristic.write(triggerValue, 
+            await wifiScanCharacteristic.write(triggerValue,
                 withoutResponse: wifiScanCharacteristic.properties.writeWithoutResponse);
-            // print("📡 Scan trigger sent successfully");
+            scanTriggered = true;
           } catch (e) {
+            scanTriggered = true; // Still accept notifications in read-only fallback
             print("⚠️ Could not write to trigger scan: $e");
             print("⚠️ Falling back to read-only mode");
           }
         } else {
+          scanTriggered = true;
           print("ℹ️ Characteristic doesn't support write, using read-only mode");
         }
         
@@ -217,6 +223,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
                   
                   // Give a short time for notifications to arrive
                   Future.delayed(Duration(milliseconds: 500), () {
+                    if (!mounted) return;
                     if (notifications.isEmpty) {
                       setState(() {
                         _isScanningWifi = false;
@@ -227,6 +234,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
                 });
               } catch (e) {
                 print("⚠️ Error on final read attempt: $e");
+                if (!mounted) return;
                 setState(() {
                   _isScanningWifi = false;
                   _statusMessage = 'Failed to receive WiFi scan data.';
@@ -279,6 +287,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
     print("📶 WifiNetworkPage: Found ${networks.length} networks");
     
     // Only update UI if we have networks or we need to show empty state
+    if (!mounted) return;
     setState(() {
       _wifiNetworks = networks;
       _isScanningWifi = false;
@@ -321,20 +330,21 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
     if (password != null && password.isNotEmpty) {
       // Connect to WiFi
       final success = await WifiUtils.connectToWifi(
-        widget.service, 
-        network, 
-        password, 
+        widget.service,
+        network,
+        password,
         (message) {
+          if (!mounted) return;
           setState(() {
             _statusMessage = message;
           });
         }
       );
-      
-      if (success) {
+
+      if (success && mounted) {
         // Return to previous screen after a delay
         Future.delayed(Duration(seconds: 2), () {
-          Navigator.pop(context);
+          if (mounted) Navigator.pop(context);
         });
       }
     }

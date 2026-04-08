@@ -202,17 +202,20 @@ class BleService {
                 result.device.platformName.toLowerCase().contains("smarty"),
           )
           .toList();
-      
+
       // Call the callback for each Smarty device
       for (var result in smartyResults) {
         onDeviceDiscovered(result);
       }
     });
-    
+
     // Wait for scan to complete and then cancel subscription
-    await Future.delayed(const Duration(seconds: 5));
-    subscription.cancel();
-    await FlutterBluePlus.stopScan();
+    try {
+      await Future.delayed(const Duration(seconds: 5));
+    } finally {
+      subscription.cancel();
+      await FlutterBluePlus.stopScan();
+    }
   }
   
   // Helper method to perform the scan. Controller is closed by the caller.

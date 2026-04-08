@@ -4,6 +4,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../../services/ble_manager.dart';
 import '../../services/ble_service.dart';
 import '../wifi/wifi_config_page.dart';
+import 'device_registration_page.dart';
 
 class SmartyConnectionPage extends StatefulWidget {
   const SmartyConnectionPage({super.key});
@@ -39,6 +40,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _showSnackBarSubscription = _bleManager.showSnackBarStream.listen((
       message,
     ) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
@@ -261,15 +263,33 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   }
 
   Future<void> _handleConnectionSuccess(BluetoothDevice device) async {
+    // Check if device needs Firebase registration (device_id readable but no secret yet)
+    final deviceId = await _bleManager.readDeviceId();
+    if (deviceId != null && deviceId.isNotEmpty && deviceId != '{}') {
+      // Device supports registration — check if it needs it
+      if (mounted) {
+        final registered = await Navigator.push<bool>(
+          context,
+          MaterialPageRoute(builder: (_) => DeviceRegistrationPage()),
+        );
+        if (registered != true) {
+          // Registration failed or cancelled — continue anyway (device may already be registered)
+          print('Device registration skipped or failed');
+        }
+      }
+    }
+
     // Wait for a definitive WiFi status — the device may report
     // transient states like "Init" right after BLE connection
     for (int i = 0; i < 3; i++) {
+      if (!mounted) return;
       if (_bleManager.isWifiConnected) {
-        if (mounted) Navigator.of(context).pop();
+        Navigator.of(context).pop();
         return;
       }
       // Give the device time to connect to WiFi before re-reading
       await Future.delayed(const Duration(seconds: 1));
+      if (!mounted) return;
       await _bleManager.readStatusUpdate();
     }
 

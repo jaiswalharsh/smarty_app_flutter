@@ -4,6 +4,9 @@ import 'package:provider/provider.dart';
 import 'screens/wifi/wifi_config_page.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/user_preferences_page.dart';
+import 'screens/auth/login_page.dart';
+import 'main.dart';
+import 'services/auth_service.dart';
 import 'services/ble_manager.dart';
 import 'utils/theme_provider.dart';
 
@@ -32,12 +35,15 @@ class _SettingsTabState extends State<SettingsTab> {
 
   // Set up status listeners
   void _setupStatusListeners() {
-    // Listen for device connection state changes — triggers rebuild so
-    // build() re-reads _bleManager.isConnected
+    // Listen for connection state changes only — rebuild when connected/disconnected toggles
+    bool lastConnected = _bleManager.isConnected;
     _deviceConnectionSubscription = _bleManager.wifiStatusStream.listen((
       status,
     ) {
-      if (mounted) {
+      if (!mounted) return;
+      final nowConnected = _bleManager.isConnected;
+      if (nowConnected != lastConnected) {
+        lastConnected = nowConnected;
         setState(() {});
       }
     });
@@ -103,6 +109,8 @@ class _SettingsTabState extends State<SettingsTab> {
                     ],
                   ),
                 ),
+                _buildAccountCard(),
+                SizedBox(height: 16),
                 _buildSettingsCard(
                   title: "Appearance",
                   description: "Toggle dark mode and customize display",
@@ -149,10 +157,6 @@ class _SettingsTabState extends State<SettingsTab> {
                 _bleManager.isConnected
                     ? _buildWifiConfigCard()
                     : _buildConnectDeviceCard(),
-                if (_bleManager.isConnected) ...[
-                  SizedBox(height: 16),
-                  _buildForgetDeviceCard(),
-                ],
                 SizedBox(height: 16),
                 _buildSettingsCard(
                   title: "About Smarty",
@@ -278,50 +282,65 @@ class _SettingsTabState extends State<SettingsTab> {
     );
   }
 
-  // Card for forgetting the saved device
-  Widget _buildForgetDeviceCard() {
+  // Card showing logged-in account
+  Widget _buildAccountCard() {
     final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+    final email = AuthService().currentUser?.email ?? "Not signed in";
 
     return _buildSettingsCard(
-      title: "Forget Device",
-      description: "Remove saved device and disconnect",
-      icon: Icons.link_off,
-      iconColor: themeProvider.isDarkMode ? Color(0xFFFF5252) : Colors.red,
+      title: email,
+      description: "Manage your account",
+      icon: Icons.person_outline,
+      iconColor: themeProvider.isDarkMode ? Color(0xFF00FFCC) : Colors.indigo,
       bgColor:
-          themeProvider.isDarkMode ? Color(0xFF2C2C44) : Colors.red.shade50,
+          themeProvider.isDarkMode ? Color(0xFF2C2C44) : Colors.indigo.shade50,
       onTap: () {
-        _showForgetDeviceDialog();
+        _showAccountDialog();
       },
     );
   }
 
-  // Forget device confirmation dialog
-  void _showForgetDeviceDialog() {
+  // Account dialog with sign-out
+  void _showAccountDialog() {
+    final email = AuthService().currentUser?.email ?? "Not signed in";
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
           title: Row(
             children: [
-              Icon(Icons.link_off, color: Colors.red, size: 24),
+              Icon(Icons.person, color: Colors.indigo, size: 24),
               SizedBox(width: 8),
-              Text("Forget Device"),
+              Text("Account"),
             ],
           ),
-          content: Text(
-            "This will disconnect and remove the saved Smarty device. You will need to re-pair using the button combo on the device.",
-            style: TextStyle(fontSize: 16),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(email, style: TextStyle(fontSize: 16)),
+              SizedBox(height: 8),
+              Text(
+                "Signed in",
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: Text("Cancel"),
+              child: Text("Close"),
             ),
             ElevatedButton(
               onPressed: () async {
                 Navigator.of(context).pop();
-                await _bleManager.disconnectAndForget();
-                if (mounted) setState(() {});
+                await AuthService().signOut();
+                if (mounted) {
+                  Navigator.of(this.context).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (_) => SplashScreen()),
+                    (route) => false,
+                  );
+                }
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,
@@ -330,7 +349,7 @@ class _SettingsTabState extends State<SettingsTab> {
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              child: Text("Forget"),
+              child: Text("Sign Out"),
             ),
           ],
           shape: RoundedRectangleBorder(
