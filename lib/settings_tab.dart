@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'screens/wifi/wifi_config_page.dart';
 import 'screens/devices/smarty_connection_page.dart';
-import 'screens/user_preferences_page.dart';
+import 'screens/user_context_page.dart';
 import 'screens/auth/login_page.dart';
 import 'main.dart';
 import 'services/auth_service.dart';
@@ -132,10 +132,10 @@ class _SettingsTabState extends State<SettingsTab> {
                 ),
                 SizedBox(height: 16),
                 _buildSettingsCard(
-                  title: "User Preferences", // Updated title
+                  title: "User Context",
                   description:
-                      "Let Smarty get to know your child through a fun conversation!", // Updated description
-                  icon: Icons.chat_bubble, // Updated icon
+                      "Tell Smarty what it should know about your child",
+                  icon: Icons.chat_bubble,
                   iconColor:
                       themeProvider.isDarkMode
                           ? Color(0xFF00FFCC)
@@ -148,8 +148,8 @@ class _SettingsTabState extends State<SettingsTab> {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (context) => UserPreferencesPage(),
-                      ), // Updated navigation
+                        builder: (context) => UserContextPage(),
+                      ),
                     );
                   },
                 ),

@@ -5,6 +5,7 @@ import 'firebase_options.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'home_tab.dart';
 import 'settings_tab.dart';
+import 'providers/user_context_provider.dart';
 import 'utils/theme_provider.dart';
 import 'services/ble_service.dart';
 import 'services/ble_manager.dart';
@@ -15,8 +16,11 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(
-    ChangeNotifierProvider(
-      create: (_) => ThemeProvider(),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => UserContextProvider()..init()),
+      ],
       child: MyApp(),
     ),
   );

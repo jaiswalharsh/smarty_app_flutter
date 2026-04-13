@@ -538,35 +538,38 @@ class BleManager {
     }
   }
 
-  // Send user data
-  Future<bool> sendUserData(String name, String age, String hobby, {String avatar = ''}) async {
+  // Write the free-form user context string to Smarty (char 0xAB03).
+  // Uses an acknowledged write so the BLE stack surfaces failures.
+  Future<bool> writeUserContext(String context) async {
     if (_userDataCharacteristic == null) {
-      print("❌ BleManager: User data characteristic not found");
+      print("❌ BleManager: User context characteristic (ab03) not found");
       return false;
     }
 
     try {
-      // Format the user data, include avatar if provided
-      String userData = avatar.isEmpty
-          ? "NAME:$name,AGE:$age,HOBBY:$hobby"
-          : "NAME:$name,AGE:$age,HOBBY:$hobby,AVATAR:$avatar";
-          
-      // print("📤 Sending user data: $userData");
-      List<int> value = utf8.encode(userData);
-
-      // Check if the characteristic supports write without response
-      bool supportsWriteWithoutResponse =
-          _userDataCharacteristic!.properties.writeWithoutResponse;
-
-      // Write the data
-      await _userDataCharacteristic!.write(
-        value,
-        withoutResponse: supportsWriteWithoutResponse,
-      );
+      final List<int> value = utf8.encode(context);
+      await _userDataCharacteristic!.write(value, withoutResponse: false);
       return true;
     } catch (e) {
-      print("❌ BleManager: Error sending user data: $e");
+      print("❌ BleManager: Error writing user context: $e");
       return false;
+    }
+  }
+
+  // Read the free-form user context string currently stored on Smarty.
+  // Returns the decoded string (possibly empty) on success, or null on error.
+  Future<String?> readUserContext() async {
+    if (_userDataCharacteristic == null) {
+      print("❌ BleManager: User context characteristic (ab03) not found");
+      return null;
+    }
+
+    try {
+      final List<int> data = await _userDataCharacteristic!.read();
+      return utf8.decode(data, allowMalformed: true);
+    } catch (e) {
+      print("❌ BleManager: Error reading user context: $e");
+      return null;
     }
   }
 
