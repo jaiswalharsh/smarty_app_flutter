@@ -3,8 +3,10 @@ import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'home_tab.dart';
-import 'settings_tab.dart';
+import 'tabs/play_tab.dart';
+import 'tabs/memory_tab.dart';
+import 'tabs/history_tab.dart';
+import 'tabs/toy_tab.dart';
 import 'providers/user_context_provider.dart';
 import 'utils/theme_provider.dart';
 import 'services/ble_service.dart';
@@ -34,9 +36,12 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Smarty Toy',
       debugShowCheckedModeBanner: false,
-      themeMode: Provider.of<ThemeProvider>(context).themeMode,
+      // Dark mode parked — light-only per Stitch migration plan §2.2. Forcing
+      // ThemeMode.light (and pointing darkTheme at the light theme) prevents a
+      // stale persisted 'dark' pref from resurfacing the retired purple theme.
+      themeMode: ThemeMode.light,
       theme: Provider.of<ThemeProvider>(context).lightTheme,
-      darkTheme: Provider.of<ThemeProvider>(context).darkTheme,
+      darkTheme: Provider.of<ThemeProvider>(context).lightTheme,
       home: SplashScreen(),
     );
   }
@@ -193,11 +198,14 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
-  int _currentIndex = 0;
+  // Default landing = Toy (index 3), not Play, per plan §0.
+  int _currentIndex = 3;
 
-  final List<Widget> _tabs = [
-    HomeTab(),
-    SettingsTab(),
+  final List<Widget> _tabs = const [
+    PlayTab(),
+    MemoryTab(),
+    HistoryTab(),
+    ToyTab(),
   ];
 
   @override
@@ -230,7 +238,9 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _tabs[_currentIndex],
+      // IndexedStack keeps every tab mounted so switching tabs doesn't tear
+      // down / re-run the Toy tab's BLE status checks each time.
+      body: IndexedStack(index: _currentIndex, children: _tabs),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           boxShadow: [
@@ -253,16 +263,22 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                 _currentIndex = index;
               });
             },
-            items: [
+            items: const [
               BottomNavigationBarItem(
-                icon: ImageIcon(
-                  AssetImage('assets/images/icon.png'),
-                ),
-                label: 'Home',
+                icon: Icon(Icons.auto_stories),
+                label: 'Play',
               ),
               BottomNavigationBarItem(
-                icon: Icon(Icons.settings_rounded),
-                label: 'Settings',
+                icon: Icon(Icons.favorite),
+                label: 'Memory',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.history),
+                label: 'History',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.smart_toy),
+                label: 'Toy',
               ),
             ],
           ),
