@@ -106,14 +106,25 @@ class BleManager {
         print("⚠️ BleManager: MTU request failed: $e");
       }
 
-      // Trigger bonding on Android (prevents double pairing popup bug)
-      // iOS handles bonding automatically when encrypted characteristics are accessed
+      // Bond on Android only on FIRST pair. The firmware persists bonds across
+      // reconnects, but calling createBond() when already bonded makes Android
+      // re-prompt "pair" on every reconnect. Guard on the current bond state so
+      // re-bonds are seamless; fall back to bonding if the state is unknown so
+      // first-time pairing still works.
+      // iOS handles bonding automatically when encrypted characteristics are read.
       if (Platform.isAndroid) {
         try {
-          await device.createBond();
-          print("BleManager: Bond created/confirmed on Android");
+          final bondState = await device.bondState.first
+              .timeout(const Duration(seconds: 3),
+                  onTimeout: () => BluetoothBondState.none);
+          if (bondState == BluetoothBondState.bonded) {
+            print("BleManager: Already bonded — skipping createBond (no re-prompt)");
+          } else {
+            await device.createBond();
+            print("BleManager: Bond created on Android");
+          }
         } catch (e) {
-          print("BleManager: Bond creation skipped (may already be bonded): $e");
+          print("BleManager: Bond check/creation skipped: $e");
         }
       }
 

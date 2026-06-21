@@ -5,6 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'services/ble_manager.dart';
 import 'services/ble_service.dart';
 import 'screens/devices/smarty_connection_page.dart';
+import 'screens/devices/device_registration_page.dart';
 
 class HomeTab extends StatefulWidget {
   const HomeTab({super.key});
@@ -356,6 +357,32 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
             color: _getBatteryColor(),
             title: isBatteryLoading ? 'Checking battery...' : 'Battery: $_batteryLevel%',
             isLoading: isBatteryLoading,
+          ),
+          SizedBox(height: 20),
+          // Auto-reconnect never runs the registration flow (only the manual
+          // pairing path does), so an auto-reconnected toy can stay unregistered.
+          // This lets the user register the connected toy on demand. Registration
+          // is idempotent, so it doubles as a "re-register" if needed.
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const DeviceRegistrationPage(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.app_registration),
+              label: const Text('Register this toy'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
           ),
         ],
       ),
