@@ -701,8 +701,16 @@ class BleManager {
       // Enable notifications
       await _wifiScanCharacteristic!.setNotifyValue(true);
 
-      // Listen for notifications
-      subscription = _wifiScanCharacteristic!.lastValueStream.listen((value) {
+      // Listen for notifications.
+      //
+      // Use onValueReceived, NOT lastValueStream. lastValueStream re-emits the
+      // characteristic's last cached value the instant we subscribe. After the
+      // first scan that cached value is the previous scan's "END" marker, so on
+      // every refresh the listener would immediately see "END" with no networks
+      // collected and complete with an empty list — "No WiFi networks found" —
+      // before the firmware's fresh scan (~5s) even reports back. onValueReceived
+      // only fires on real reads/notifications, so we wait for genuine results.
+      subscription = _wifiScanCharacteristic!.onValueReceived.listen((value) {
         if (value.isEmpty) return;
 
         String notification = String.fromCharCodes(value);
@@ -755,6 +763,9 @@ class BleManager {
           _wifiScanCharacteristic!.properties.writeWithoutResponse;
 
       if (supportsWrite) {
+        // A single "SCAN" write is the trigger. Notifications were already
+        // enabled by setNotifyValue() above, so results arrive without a read —
+        // avoiding a second, redundant scan trigger on the firmware.
         List<int> triggerValue = utf8.encode("SCAN");
         await _wifiScanCharacteristic!.write(
           triggerValue,
@@ -762,11 +773,11 @@ class BleManager {
               _wifiScanCharacteristic!.properties.writeWithoutResponse,
         );
         // print("📶 BleManager: Sent SCAN command to trigger WiFi scan");
+      } else {
+        // Fallback for a read/notify-only characteristic: a read triggers the
+        // firmware scan instead.
+        await _wifiScanCharacteristic!.read();
       }
-
-      // Read the characteristic to start receiving notifications
-      await _wifiScanCharacteristic!.read();
-      // print("📶 BleManager: Initial read completed to start notifications");
 
       // Set a timeout (cancelled on completion via whenComplete below)
       final scanTimer = Timer(Duration(seconds: 15), () {
