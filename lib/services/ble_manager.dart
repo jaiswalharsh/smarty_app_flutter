@@ -49,6 +49,12 @@ class BleManager {
   // Status notification subscription
   StreamSubscription<List<int>>? _statusNotificationSubscription;
 
+  // Fires when the peripheral sends a GATT "Service Changed" indication
+  // (e.g. after a firmware reflash, or the post-bond Service Changed this
+  // device sends). Android caches services for bonded devices, so we must
+  // re-discover to pick up characteristics the cached table was missing.
+  StreamSubscription<void>? _servicesResetSubscription;
+
   // Status information
   String _connectedWifi = "Unknown";
   int _batteryLevel = 0;
@@ -131,6 +137,20 @@ class BleManager {
       if (_statusCharacteristic != null) {
         _setupStatusUpdates();
       }
+
+      // Re-discover when the peripheral signals its GATT table changed. This
+      // device sends a Service Changed indication right after bonding — which
+      // arrives AFTER the discovery above — and again whenever the firmware is
+      // reflashed. Without this, a stale/incomplete cached table (e.g. missing
+      // the ab01 Wi-Fi scan characteristic) is never refreshed.
+      _servicesResetSubscription?.cancel();
+      _servicesResetSubscription = device.onServicesReset.listen((_) async {
+        print("🔄 BleManager: Service Changed received — re-discovering services");
+        final ok = await _discoverServices();
+        if (ok && _statusCharacteristic != null) {
+          _setupStatusUpdates();
+        }
+      });
 
       // Set up connection state monitoring
       _monitorDeviceConnection();
@@ -223,6 +243,8 @@ class BleManager {
     _connectionStateSubscription = null;
     _statusNotificationSubscription?.cancel();
     _statusNotificationSubscription = null;
+    _servicesResetSubscription?.cancel();
+    _servicesResetSubscription = null;
     _smartyService = null;
     _statusCharacteristic = null;
     _wifiScanCharacteristic = null;
@@ -657,8 +679,14 @@ class BleManager {
 
   // Scan for WiFi networks
   Future<List<String>> scanWifiNetworks() async {
+    // Defensive: if the cached table was refreshed lazily (or the Service
+    // Changed listener hasn't fired yet), try one re-discovery before giving up.
     if (_wifiScanCharacteristic == null) {
-      print("❌ BleManager: WiFi scan characteristic not found");
+      print("⚠️ BleManager: WiFi scan characteristic missing — re-discovering services");
+      await _discoverServices();
+    }
+    if (_wifiScanCharacteristic == null) {
+      print("❌ BleManager: WiFi scan characteristic not found after re-discovery");
       return [];
     }
 
