@@ -602,16 +602,31 @@ class BleManager {
       return null;
     }
 
-    try {
-      List<int> data = await _deviceInfoCharacteristic!.read();
-      if (data.isEmpty) return null;
-      String deviceId = String.fromCharCodes(data);
-      print("BleManager: Read device ID: $deviceId");
-      return deviceId;
-    } catch (e) {
-      print("❌ BleManager: Error reading device ID: $e");
-      return null;
+    // ab06 uses ESP_GATT_AUTO_RSP: the first read after a fresh connection often
+    // returns the "{}" placeholder, with the real MAC-derived id arriving on a
+    // later read (the same quirk the status read already retries around). Retry
+    // a few times, treating empty or "{}" as "not ready yet".
+    const retryDelaysMs = [0, 300, 500];
+    for (int attempt = 0; attempt < retryDelaysMs.length; attempt++) {
+      if (retryDelaysMs[attempt] > 0) {
+        await Future.delayed(Duration(milliseconds: retryDelaysMs[attempt]));
+      }
+      try {
+        List<int> data = await _deviceInfoCharacteristic!.read();
+        if (data.isNotEmpty) {
+          String deviceId = String.fromCharCodes(data);
+          if (deviceId != '{}' && deviceId.trim().isNotEmpty) {
+            print("BleManager: Read device ID: $deviceId");
+            return deviceId;
+          }
+          print("⚠️ BleManager: device ID not ready (got '$deviceId'), retrying...");
+        }
+      } catch (e) {
+        print("❌ BleManager: Error reading device ID (attempt ${attempt + 1}): $e");
+      }
     }
+    print("❌ BleManager: device ID unavailable after retries");
+    return null;
   }
 
   // Write device secret to ESP32 for Firebase registration

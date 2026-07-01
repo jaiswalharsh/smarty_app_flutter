@@ -50,15 +50,16 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
         _status = 'Registering device...';
       });
 
-      final secret = await _registrationService.registerDevice(deviceId);
+      final result = await _registrationService.registerDevice(deviceId);
       if (!mounted) return;
-      if (secret == null) {
+      if (!result.ok) {
         setState(() {
           _currentStep = -1;
-          _errorMessage = 'Device registration failed. Please check your internet connection and try again.';
+          _errorMessage = result.error ?? 'Device registration failed. Please try again.';
         });
         return;
       }
+      final secret = result.secret!;
 
       // Step 3: Write secret to device
       setState(() {
@@ -86,6 +87,17 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
       await Future.delayed(const Duration(seconds: 2));
       if (mounted) {
         Navigator.of(context).pop(true);
+      }
+    } catch (e) {
+      // Safety net: any unexpected throw (e.g. getIdToken() failing during an
+      // offline token refresh) must surface as an error — never leave the
+      // progress screen spinning forever.
+      debugPrint('DeviceRegistration: unexpected error: $e');
+      if (mounted) {
+        setState(() {
+          _currentStep = -1;
+          _errorMessage = 'Something went wrong during registration. Please try again.';
+        });
       }
     } finally {
       _isRegistering = false;
