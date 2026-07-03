@@ -292,7 +292,6 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   Widget _buildConnectedView() {
     bool isWifiLoading = _connectedWifi == "Unknown";
-    bool isBatteryLoading = _batteryLevel == "Unknown";
 
     return SingleChildScrollView(
       child: Column(
@@ -332,7 +331,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
                     ),
                     SizedBox(height: 4),
                     Text(
-                      (isWifiLoading || isBatteryLoading) ? 'Fetching status...' : 'Ready to play',
+                      isWifiLoading ? 'Fetching status...' : 'Ready to play',
                       style: TextStyle(
                         fontSize: 14,
                         color: Colors.blue.shade700,
@@ -350,13 +349,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
             title: isWifiLoading ? 'Checking WiFi...' : _bleManager.isWifiConnected ? 'WiFi: $_connectedWifi' : 'WiFi: Not connected',
             isLoading: isWifiLoading,
           ),
-          SizedBox(height: 12),
-          _buildStatusCard(
-            icon: isBatteryLoading ? null : _getBatteryIcon(),
-            color: _getBatteryColor(),
-            title: isBatteryLoading ? 'Checking battery...' : 'Battery: $_batteryLevel%',
-            isLoading: isBatteryLoading,
-          ),
+          // NOTE: battery status card intentionally omitted — the device has no
+          // battery sensing yet (firmware returns a fixed placeholder), so showing
+          // a precise "%" would mislead parents (APP-7 / FW-21). Restore this card
+          // once real battery telemetry exists.
         ],
       ),
     );
@@ -530,23 +526,6 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
-  IconData _getBatteryIcon() {
-    int level = int.tryParse(_batteryLevel) ?? 0;
-    if (level >= 90) return Icons.battery_full;
-    if (level >= 70) return Icons.battery_6_bar;
-    if (level >= 50) return Icons.battery_4_bar;
-    if (level >= 30) return Icons.battery_3_bar;
-    if (level >= 20) return Icons.battery_2_bar;
-    if (level >= 10) return Icons.battery_1_bar;
-    return Icons.battery_0_bar;
-  }
-
-  Color _getBatteryColor() {
-    int level = int.tryParse(_batteryLevel) ?? 0;
-    if (level >= 50) return Colors.green;
-    if (level >= 20) return Colors.orange;
-    return Colors.red;
-  }
 }
 
 class ConfettiPainter extends CustomPainter {

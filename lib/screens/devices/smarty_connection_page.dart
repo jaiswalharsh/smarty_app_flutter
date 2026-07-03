@@ -257,8 +257,11 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         } else {
           _connectionResult = 'Failed to connect: $e';
         }
-        _startScanning();
       });
+      // Kick off a rescan AFTER the state update, not inside setState() — starting
+      // an async scan (which itself calls setState) from within a build-state
+      // mutation is fragile and can throw "setState during build" (APP-6).
+      _startScanning();
     }
   }
 
@@ -554,6 +557,20 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                             'Make sure your device is powered on and in pairing mode',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.grey[600]),
+                          ),
+                          SizedBox(height: 8),
+                          // APP-4: a denied Bluetooth (or, on older Android,
+                          // Location) permission makes scanning silently return
+                          // nothing — which otherwise reads as "device off". Point
+                          // the user at the real cause.
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                            child: Text(
+                              'Also check that Bluetooth is on and that this app has '
+                              'Bluetooth (and Location, on older Android) permission.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                            ),
                           ),
                           SizedBox(height: 8),
                           // Updated tip section

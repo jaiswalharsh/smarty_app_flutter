@@ -56,20 +56,34 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         _statusMessage = 'Connecting to $network...';
       });
 
-      final success = await _bleManager.connectToWifi(network, password);
+      // Wait for the device's REAL join result, not just the BLE write ack, so a
+      // wrong password is reported as such instead of a false "Connected!" (APP-1).
+      final result = await _bleManager.connectToWifiAndAwait(network, password);
 
       if (!mounted) return;
-      if (success) {
-        setState(() {
-          _statusMessage = 'Connected to $network!';
-        });
-        Future.delayed(Duration(seconds: 2), () {
-          if (mounted) Navigator.pop(context);
-        });
-      } else {
-        setState(() {
-          _statusMessage = 'Failed to connect to $network';
-        });
+      switch (result) {
+        case WifiProvisionResult.connected:
+          setState(() => _statusMessage = 'Connected to $network!');
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted) Navigator.pop(context);
+          });
+          break;
+        case WifiProvisionResult.wrongPassword:
+          setState(() => _statusMessage =
+              'Incorrect Wi-Fi password for $network. Please try again.');
+          break;
+        case WifiProvisionResult.failed:
+          setState(() => _statusMessage =
+              "Couldn't connect to $network. Check the network and try again.");
+          break;
+        case WifiProvisionResult.timeout:
+          setState(() => _statusMessage =
+              "Still connecting to $network… check Smarty's Wi-Fi status in a moment.");
+          break;
+        case WifiProvisionResult.writeError:
+          setState(() => _statusMessage =
+              "Couldn't send Wi-Fi details to Smarty. Reconnect and try again.");
+          break;
       }
     }
   }

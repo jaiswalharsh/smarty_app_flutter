@@ -301,86 +301,23 @@ class BleService {
     }
   }
   
-  // Debounce: prevent rapid scan spam from multiple callers
-  static DateTime _lastReconnectScanTime = DateTime.fromMillisecondsSinceEpoch(0);
-
-  // Internal method for getting connected devices
+  // Internal method for getting connected devices.
+  //
+  // Returns only devices the OS already reports as connected, filtered to Smarty.
+  // It deliberately does NOT scan for and auto-connect to arbitrary nearby
+  // "smarty"-named devices (APP-3) — in a household/building with more than one
+  // Smarty that silently attached the app to the wrong unit. Reconnecting to the
+  // user's OWN device is handled by autoReconnectToSavedDevice(), which targets
+  // the saved remoteId; discovering a new device is user-driven via the scan UI.
   static Future<List<BluetoothDevice>> _getConnectedDevicesInternal() async {
-    // Get the list of connected devices from the cache
-    List<BluetoothDevice> connectedDevices = FlutterBluePlus.connectedDevices;
+    final connectedDevices = FlutterBluePlus.connectedDevices
+        .where((d) => d.platformName.toLowerCase().contains("smarty"))
+        .toList();
 
-    // If no devices found in cache, try to get system-connected devices
-    if (connectedDevices.isEmpty) {
-      // Skip scan if one ran recently (within 3 seconds)
-      if (DateTime.now().difference(_lastReconnectScanTime).inSeconds < 3) {
-        return [];
-      }
-      _lastReconnectScanTime = DateTime.now();
-
-      try {
-        // Try to reconnect to previously known devices by scanning
-        print("📱 Scanning for nearby Smarty devices to reconnect...");
-        
-        // Verify Bluetooth is still ready before scanning
-        bool isReady = await isBluetoothReady();
-        if (!isReady) {
-          print("⚠️ Bluetooth is not enabled. Cannot scan for devices.");
-          return [];
-        }
-        
-        await FlutterBluePlus.startScan(timeout: Duration(seconds: 2));
-        
-        // Wait for 2 seconds to allow scan to complete
-        await Future.delayed(Duration(seconds: 2));
-        
-        // Get scan results
-        final results = FlutterBluePlus.lastScanResults;
-        
-        // Filter for Smarty devices
-        final smartyResults = results
-            .where((result) => 
-                result.device.platformName.isNotEmpty && 
-                result.device.platformName.toLowerCase().contains("smarty"))
-            .toList();
-            
-        if (smartyResults.isNotEmpty) {
-          print("✅ Found ${smartyResults.length} nearby Smarty devices");
-          
-          for (var result in smartyResults) {
-            BluetoothDevice device = result.device;
-            // print("  - ${device.platformName} (${device.remoteId})");
-            
-            // Check if it's already connected
-            if (!device.isConnected) {
-              try {
-                // Attempt to connect
-                print("🔄 Attempting to connect to ${device.platformName}...");
-                await device.connect();
-                print("✅ Connected to ${device.platformName}");
-              } catch (e) {
-                print("⚠️ Connection attempt to ${device.platformName} failed: $e");
-              }
-            } else {
-              // print("✅ ${device.platformName} is already connected");
-            }
-          }
-          
-          // Update connected devices list
-          connectedDevices = FlutterBluePlus.connectedDevices;
-        }
-        
-        // Stop the scan
-        await FlutterBluePlus.stopScan();
-      } catch (e) {
-        print("⚠️ Error during scan and connect: $e");
-      }
-    }
-    
-    // Log the final list of connected devices
     if (connectedDevices.isNotEmpty) {
-      print("✅ Connected devices count: ${connectedDevices.length}");
+      print("✅ Connected Smarty devices: ${connectedDevices.length}");
     }
-    
+
     return connectedDevices;
   }
   

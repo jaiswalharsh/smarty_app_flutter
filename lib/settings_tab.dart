@@ -4,7 +4,6 @@ import 'package:provider/provider.dart';
 import 'screens/wifi/wifi_config_page.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/user_context_page.dart';
-import 'screens/auth/login_page.dart';
 import 'main.dart';
 import 'services/auth_service.dart';
 import 'services/ble_manager.dart';
@@ -511,7 +510,9 @@ class _SettingsTabState extends State<SettingsTab> {
               ),
               SizedBox(height: 16),
               Text("Version: 1.0.0"),
-              Text("Firmware: 0.9.2"),
+              // Firmware version intentionally not shown: the device doesn't yet
+              // report it over BLE, and a hardcoded number would drift and
+              // mislead (APP-11). Restore this once it's read from the device.
               SizedBox(height: 16),
               Text(
                 "© 2025 HeySmarty sp. zoo. All rights reserved.",

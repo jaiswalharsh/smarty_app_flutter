@@ -6,6 +6,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/wifi_utils.dart';
 import 'ble_service.dart';
 
+/// Outcome of a Wi-Fi provisioning attempt, derived from the device's own status
+/// characteristic — NOT merely from the BLE credential write being acknowledged.
+enum WifiProvisionResult {
+  connected,      // device reported it joined the target SSID (got an IP)
+  wrongPassword,  // device reported "Auth Failed"
+  failed,         // device reported a non-auth connection failure
+  timeout,        // no definitive status within the wait window
+  writeError,     // couldn't even deliver the credentials over BLE
+}
+
 // A singleton class to manage BLE connections and data
 class BleManager {
   // Saved device persistence keys
@@ -665,6 +675,59 @@ class BleManager {
     } catch (e) {
       print("❌ BleManager: Error connecting to WiFi: $e");
       return false;
+    }
+  }
+
+  /// Send Wi-Fi credentials AND wait for the device to report the real outcome.
+  ///
+  /// The plain [connectToWifi] returns as soon as the BLE write is acknowledged,
+  /// which only means the credentials were delivered — the ESP32 then tries to
+  /// join asynchronously and reports success (the SSID) or failure ("Auth
+  /// Failed" / "Connection Failed") over the status characteristic. Showing
+  /// "Connected!" on the bare write ack made a wrong password look like success
+  /// (APP-1). This method subscribes to the status stream FIRST, writes the
+  /// credentials, then resolves on the first definitive status (or a timeout).
+  Future<WifiProvisionResult> connectToWifiAndAwait(
+    String ssid,
+    String password, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    if (_wifiCredsCharacteristic == null) {
+      print("❌ BleManager: WiFi credentials characteristic not found");
+      return WifiProvisionResult.writeError;
+    }
+
+    final completer = Completer<WifiProvisionResult>();
+
+    // Subscribe BEFORE writing so a fast result isn't missed. Firmware status
+    // tokens come from wifi_config.c (exact strings, incl. the space).
+    StreamSubscription<String>? sub;
+    sub = wifiStatusStream.listen((status) {
+      final s = status.trim();
+      if (s == 'Auth Failed') {
+        if (!completer.isCompleted) completer.complete(WifiProvisionResult.wrongPassword);
+      } else if (s == 'Connection Failed' || s == 'No credentials') {
+        if (!completer.isCompleted) completer.complete(WifiProvisionResult.failed);
+      } else if (s == ssid) {
+        // On IP_EVENT_STA_GOT_IP the device reports the joined SSID as its status.
+        if (!completer.isCompleted) completer.complete(WifiProvisionResult.connected);
+      }
+      // Transient states ("Initializing", "Reconnecting") are ignored — we keep
+      // waiting for a terminal result.
+    });
+
+    try {
+      final wrote = await connectToWifi(ssid, password);
+      if (!wrote) {
+        return WifiProvisionResult.writeError;
+      }
+      return await completer.future
+          .timeout(timeout, onTimeout: () => WifiProvisionResult.timeout);
+    } catch (e) {
+      print("❌ BleManager: connectToWifiAndAwait error: $e");
+      return WifiProvisionResult.failed;
+    } finally {
+      await sub.cancel();
     }
   }
 
