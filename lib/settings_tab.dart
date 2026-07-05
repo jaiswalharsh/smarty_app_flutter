@@ -333,6 +333,10 @@ class _SettingsTabState extends State<SettingsTab> {
             ElevatedButton(
               onPressed: () async {
                 Navigator.of(context).pop();
+                // Tear down BLE before signing out so the next account doesn't
+                // inherit a live connection (listener cancelled first → no
+                // auto-reconnect fires during teardown).
+                await BleManager().disconnectAndReset();
                 await AuthService().signOut();
                 if (mounted) {
                   Navigator.of(this.context).pushAndRemoveUntil(

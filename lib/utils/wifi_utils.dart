@@ -1,69 +1,98 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 
+/// One access point from a firmware Wi-Fi scan.
+///
+/// [auth] is the esp_wifi wifi_auth_mode_t integer the toy reports (0 = open).
+/// A value of -1 means "unknown" (old-format fallback line) and is treated as
+/// secured so the app never sends an empty password to a network that needs one.
+class WifiNetwork {
+  final String ssid;
+  final int rssi;
+  final int auth;
+  const WifiNetwork(this.ssid, this.rssi, this.auth);
+  bool get isOpen => auth == 0;
+}
+
 class WifiUtils {
-  // Process the WiFi scan data and extract network information
-  // New format:
-  // - First notification: "TOTAL:N" where N is the total number of access points
-  // - For each AP (1 to N): "i:SSID:RSSI,AUTH"
-  // - Final notification: "END" to indicate completion
-  static List<String> processWifiScanData(String data) {
-    List<String> networks = [];
+  // Process the WiFi scan data and extract network information.
+  //
+  // Firmware format: framed by "TOTAL:N" / "END", one AP per line as
+  // "i:SSID:RSSI,AUTH" (AUTH = esp_wifi wifi_auth_mode_t, 0 = open). The SSID
+  // itself may contain ':' — so we take the index before the FIRST ':' and the
+  // "RSSI,AUTH" tail after the LAST ':', and treat EVERYTHING in between as the
+  // SSID. The old parser split on every ':' and took parts[1], silently
+  // truncating any SSID that contained a colon.
+  static List<WifiNetwork> processWifiScanData(String data) {
+    // Dedup by SSID, keeping the strongest (highest) RSSI.
+    final Map<String, WifiNetwork> byssid = {};
 
     try {
       if (data.isEmpty) {
         print("📶 Empty WiFi scan data received");
-        return networks;
+        return [];
       }
 
-      // Split the data by newlines or commas for compatibility with old and new formats
-      List<String> lines = data.contains('\n') ? data.split('\n') : data.split(',');
+      // Each AP arrives on its own line (the scanner joins notifications with
+      // '\n'). Only fall back to comma-splitting for a legacy single-line list
+      // of bare SSIDs — never for a lone "i:SSID:RSSI,AUTH" line, whose tail
+      // comma must survive.
+      final List<String> lines;
+      if (data.contains('\n')) {
+        lines = data.split('\n');
+      } else if (data.contains(':')) {
+        lines = [data];
+      } else {
+        lines = data.split(',');
+      }
 
       for (String line in lines) {
-        String trimmedLine = line.trim();
-        if (trimmedLine.isEmpty) {
-          continue;
-        }
-
+        final String trimmedLine = line.trim();
+        if (trimmedLine.isEmpty) continue;
         // Skip header/footer markers
-        if (trimmedLine.startsWith("TOTAL:") || trimmedLine == "END") {
-          continue;
-        }
+        if (trimmedLine.startsWith("TOTAL:") || trimmedLine == "END") continue;
 
-        // Try to parse as new format: "i:SSID:RSSI,AUTH"
-        if (trimmedLine.contains(":")) {
-          List<String> parts = trimmedLine.split(":");
-
-          if (parts.length >= 3) {
-            // Extract the SSID
-            String ssid = parts[1];
-
-            // Skip networks with empty SSIDs
-            if (ssid.trim().isEmpty) {
-              continue;
+        WifiNetwork? network;
+        final int firstColon = trimmedLine.indexOf(':');
+        final int lastColon = trimmedLine.lastIndexOf(':');
+        // Need at least two distinct ':' to carry the "i:...:RSSI,AUTH" frame.
+        if (lastColon > firstColon) {
+          final List<String> tail =
+              trimmedLine.substring(lastColon + 1).split(',');
+          if (tail.length == 2) {
+            final int? rssi = int.tryParse(tail[0].trim());
+            final int? auth = int.tryParse(tail[1].trim());
+            if (rssi != null && auth != null) {
+              network = WifiNetwork(
+                trimmedLine.substring(firstColon + 1, lastColon),
+                rssi,
+                auth,
+              );
             }
-
-            networks.add(ssid);
-            continue;
           }
         }
+        // Old format / unparseable tail: whole line is the SSID (unknown signal).
+        network ??= WifiNetwork(trimmedLine, 0, -1);
 
-        // Old format or something else — add the whole line (skipping empties)
-        if (trimmedLine.isNotEmpty) {
-          networks.add(trimmedLine);
+        // Skip hidden APs (empty SSID) — reachable via manual "join hidden".
+        if (network.ssid.trim().isEmpty) continue;
+
+        final existing = byssid[network.ssid];
+        if (existing == null || network.rssi > existing.rssi) {
+          byssid[network.ssid] = network;
         }
       }
 
-      // Remove duplicates and sort
-      networks = networks.toSet().toList();
-      networks.sort();
+      // Strongest first — usually the parent's own network.
+      final List<WifiNetwork> networks = byssid.values.toList()
+        ..sort((a, b) => b.rssi.compareTo(a.rssi));
 
       print("📶 Processed ${networks.length} networks");
+      return networks;
     } catch (e) {
       print("❌ Error processing WiFi scan data: $e");
+      return [];
     }
-
-    return networks;
   }
 
   // Show password dialog for WiFi connection
@@ -74,46 +103,72 @@ class WifiUtils {
     // Owned here (not inside the builder) so it can be disposed after the dialog
     // resolves — the previous version leaked a TextEditingController per dialog (APP-9).
     final TextEditingController passwordController = TextEditingController();
+    bool obscure = true;
+    String? errorText;
 
     final result = await showDialog<String?>(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: Text('Connect to $network'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: passwordController,
-                  decoration: InputDecoration(
-                    labelText: 'WiFi Password',
-                    border: OutlineInputBorder(),
-                  ),
-                  obscureText: true,
-                  autofocus: true,
-                  onSubmitted: (value) {
-                    Navigator.of(dialogContext).pop(value);
+        return StatefulBuilder(
+          builder: (context, setLocalState) {
+            // A secured network needs a key. An empty submit used to no-op
+            // silently, leaving the parent stuck — reject it with a hint.
+            void submit() {
+              if (passwordController.text.isEmpty) {
+                setLocalState(() => errorText = 'Please enter the password');
+                return;
+              }
+              Navigator.of(dialogContext).pop(passwordController.text);
+            }
+
+            return AlertDialog(
+              title: Text('Connect to $network'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: passwordController,
+                      decoration: InputDecoration(
+                        labelText: 'WiFi Password',
+                        border: const OutlineInputBorder(),
+                        errorText: errorText,
+                        suffixIcon: IconButton(
+                          icon: Icon(obscure
+                              ? Icons.visibility_off
+                              : Icons.visibility),
+                          tooltip: obscure ? 'Show password' : 'Hide password',
+                          onPressed: () =>
+                              setLocalState(() => obscure = !obscure),
+                        ),
+                      ),
+                      obscureText: obscure,
+                      autofocus: true,
+                      onChanged: (_) {
+                        if (errorText != null) {
+                          setLocalState(() => errorText = null);
+                        }
+                      },
+                      onSubmitted: (_) => submit(),
+                    ),
+                  ],
+                ),
+              ),
+              actions: <Widget>[
+                TextButton(
+                  child: Text('Cancel'),
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop(null);
                   },
                 ),
+                TextButton(
+                  onPressed: submit,
+                  child: Text('Connect'),
+                ),
               ],
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: Text('Cancel'),
-              onPressed: () {
-                Navigator.of(dialogContext).pop(null);
-              },
-            ),
-            TextButton(
-              child: Text('Connect'),
-              onPressed: () {
-                Navigator.of(dialogContext).pop(passwordController.text);
-              },
-            ),
-          ],
+            );
+          },
         );
       },
     );

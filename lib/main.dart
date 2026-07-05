@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -216,21 +217,23 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    BleManager().dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.detached) {
-      BleManager().dispose();
+      unawaited(BleManager().disconnectAndReset());
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _tabs[_currentIndex],
+      // Tabs must stay mounted, so switching back to Home doesn't re-trigger
+      // its BLE reconnect flow (which can show a ~15s reconnect spinner when
+      // the toy is off). IndexedStack keeps all tabs alive and just shows one.
+      body: IndexedStack(index: _currentIndex, children: _tabs),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           boxShadow: [

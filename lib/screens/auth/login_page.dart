@@ -16,16 +16,21 @@ class _LoginPageState extends State<LoginPage> {
   final AuthService _authService = AuthService();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
 
   bool _isSignUp = false;
   bool _isLoading = false;
+  bool _isSendingReset = false;
+  bool _obscurePassword = true;
   String? _errorMessage;
+  String? _infoMessage;
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _confirmPasswordController.dispose();
     super.dispose();
   }
 
@@ -35,6 +40,7 @@ class _LoginPageState extends State<LoginPage> {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _infoMessage = null;
     });
 
     try {
@@ -90,8 +96,99 @@ class _LoginPageState extends State<LoginPage> {
         return 'Password must be at least 6 characters.';
       case 'invalid-email':
         return 'Please enter a valid email address.';
+      case 'network-request-failed':
+        return "Can't reach the internet — check your connection and try again.";
+      case 'too-many-requests':
+        return 'Too many attempts — please wait a few minutes and try again.';
+      case 'user-disabled':
+        return 'This account has been disabled. Please contact support.';
       default:
         return 'Authentication failed. Please try again.';
+    }
+  }
+
+  bool _isValidEmail(String value) {
+    return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(value.trim());
+  }
+
+  String _resetError(String code) {
+    switch (code) {
+      case 'invalid-email':
+        return 'Please enter a valid email address.';
+      case 'network-request-failed':
+        return "Can't reach the internet — check your connection and try again.";
+      case 'too-many-requests':
+        return 'Too many attempts — please wait a few minutes and try again.';
+      default:
+        return "Couldn't send the reset email. Please try again.";
+    }
+  }
+
+  Future<void> _sendPasswordReset() async {
+    final email = _emailController.text.trim();
+    if (!_isValidEmail(email)) {
+      setState(() {
+        _infoMessage = null;
+        _errorMessage = 'Please enter your email address above first.';
+      });
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Reset password?'),
+        content: Text("We'll send a password reset link to $email."),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text('Send link'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    if (!mounted) return;
+
+    setState(() {
+      _isSendingReset = true;
+      _errorMessage = null;
+      _infoMessage = null;
+    });
+
+    try {
+      await _authService.sendPasswordResetEmail(email);
+      if (!mounted) return;
+      setState(() {
+        // Neutral copy on purpose: Firebase's email-enumeration protection means
+        // a reset for an unknown address may not throw, so we must not reveal
+        // whether an account exists for this email.
+        _errorMessage = null;
+        _infoMessage =
+            'If an account exists for $email, a password reset link is on its way. Check your spam folder too.';
+      });
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _infoMessage = null;
+        _errorMessage = _resetError(e.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _infoMessage = null;
+        _errorMessage = "Couldn't send the reset email. Please try again.";
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSendingReset = false;
+        });
+      }
     }
   }
 
@@ -178,7 +275,7 @@ class _LoginPageState extends State<LoginPage> {
                                 if (value == null || value.trim().isEmpty) {
                                   return 'Please enter your email';
                                 }
-                                if (!value.contains('@')) {
+                                if (!_isValidEmail(value)) {
                                   return 'Please enter a valid email';
                                 }
                                 return null;
@@ -187,10 +284,22 @@ class _LoginPageState extends State<LoginPage> {
                             SizedBox(height: 16),
                             TextFormField(
                               controller: _passwordController,
-                              obscureText: true,
+                              obscureText: _obscurePassword,
                               decoration: InputDecoration(
                                 labelText: 'Password',
                                 prefixIcon: Icon(Icons.lock_outlined),
+                                suffixIcon: IconButton(
+                                  icon: Icon(
+                                    _obscurePassword
+                                        ? Icons.visibility_outlined
+                                        : Icons.visibility_off_outlined,
+                                  ),
+                                  onPressed: () {
+                                    setState(() {
+                                      _obscurePassword = !_obscurePassword;
+                                    });
+                                  },
+                                ),
                                 border: OutlineInputBorder(
                                   borderRadius: BorderRadius.circular(12),
                                 ),
@@ -205,12 +314,63 @@ class _LoginPageState extends State<LoginPage> {
                                 return null;
                               },
                             ),
+                            if (_isSignUp) ...[
+                              SizedBox(height: 16),
+                              TextFormField(
+                                controller: _confirmPasswordController,
+                                obscureText: _obscurePassword,
+                                decoration: InputDecoration(
+                                  labelText: 'Confirm password',
+                                  prefixIcon: Icon(Icons.lock_outline),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                validator: (value) {
+                                  if (!_isSignUp) return null;
+                                  if (value == null || value.isEmpty) {
+                                    return 'Please confirm your password';
+                                  }
+                                  if (value != _passwordController.text) {
+                                    return "Passwords don't match";
+                                  }
+                                  return null;
+                                },
+                              ),
+                            ],
+                            if (!_isSignUp)
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton(
+                                  onPressed: (_isSendingReset || _isLoading)
+                                      ? null
+                                      : _sendPasswordReset,
+                                  child: Text(
+                                    'Forgot password?',
+                                    style: TextStyle(
+                                      color: Color(0xFF4169E1),
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                              ),
                             if (_errorMessage != null) ...[
                               SizedBox(height: 12),
                               Text(
                                 _errorMessage!,
                                 style: TextStyle(
                                   color: Colors.red,
+                                  fontSize: 14,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ],
+                            if (_infoMessage != null) ...[
+                              SizedBox(height: 12),
+                              Text(
+                                _infoMessage!,
+                                style: TextStyle(
+                                  color: Colors.green.shade700,
                                   fontSize: 14,
                                 ),
                                 textAlign: TextAlign.center,
@@ -250,6 +410,8 @@ class _LoginPageState extends State<LoginPage> {
                                 setState(() {
                                   _isSignUp = !_isSignUp;
                                   _errorMessage = null;
+                                  _infoMessage = null;
+                                  _confirmPasswordController.clear();
                                 });
                               },
                               child: Text(

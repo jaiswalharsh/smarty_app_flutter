@@ -161,23 +161,37 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
                 textAlign: TextAlign.center,
               ),
               SizedBox(height: 24),
-              ElevatedButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _errorMessage = null;
-                  });
-                  _startRegistration();
-                },
-                icon: Icon(Icons.refresh),
-                label: Text('Retry'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue.shade600,
-                  foregroundColor: Colors.white,
-                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+              // Retry stays the primary action; "Not now" gives an explicit
+              // exit (pops `false`) so backing out lands in the connection
+              // page's honest "not finished" dialog instead of a dead end.
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: Text('Not now'),
                   ),
-                ),
+                  SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _errorMessage = null;
+                      });
+                      _startRegistration();
+                    },
+                    icon: Icon(Icons.refresh),
+                    label: Text('Retry'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue.shade600,
+                      foregroundColor: Colors.white,
+                      padding:
+                          EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ],

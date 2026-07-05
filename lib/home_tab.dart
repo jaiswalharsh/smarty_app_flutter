@@ -5,6 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'services/ble_manager.dart';
 import 'services/ble_service.dart';
 import 'screens/devices/smarty_connection_page.dart';
+import 'screens/wifi/wifi_config_page.dart';
 
 class HomeTab extends StatefulWidget {
   const HomeTab({super.key});
@@ -23,6 +24,14 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   StreamSubscription? _batteryStatusSubscription;
   StreamSubscription? _showSnackBarSubscription;
   bool _isConnectingDevice = false;
+  // True when a uid-scoped toy is saved for auto-reconnect. Lets the
+  // disconnected view tell "toy is off/out of range" apart from "never paired".
+  bool _hasSavedDevice = false;
+  // Watchdog for a status read that never lands: if we stay on "Unknown" while
+  // BLE-connected past the timeout, surface a manual refresh instead of spinning
+  // "Checking WiFi..." forever.
+  Timer? _wifiStallTimer;
+  bool _wifiStatusStalled = false;
 
   @override
   void initState() {
@@ -34,9 +43,18 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
     _wifiStatusSubscription = _bleManager.wifiStatusStream.listen((wifiName) {
       if (!mounted) return;
+      // A status event just proved the link is alive — stand down the stall watch.
+      _wifiStallTimer?.cancel();
       setState(() {
         _connectedWifi = wifiName;
+        _wifiStatusStalled = false;
       });
+      // The toy dropping (or being forgotten in Settings) surfaces as
+      // "NotConnected" — re-check whether a saved toy still exists so the
+      // disconnected view offers the right recovery path.
+      if (wifiName == "NotConnected") {
+        _refreshSavedDeviceFlag();
+      }
     });
 
     _batteryStatusSubscription = _bleManager.batteryStatusStream.listen((batteryLevel) {
@@ -64,6 +82,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _wifiStatusSubscription?.cancel();
     _batteryStatusSubscription?.cancel();
     _showSnackBarSubscription?.cancel();
+    _wifiStallTimer?.cancel();
     _animationController.dispose();
     super.dispose();
   }
@@ -80,6 +99,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       if (_connectedWifi == "Unknown" || _batteryLevel == "Unknown") {
         _fetchStatusInBackground();
       }
+      _armWifiStallTimer();
     } else {
       // Check for connected devices without assuming connection attempt
       await _checkForConnectedDevices();
@@ -104,6 +124,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
               _isConnectingDevice = false;
             });
             _fetchStatusInBackground();
+            _armWifiStallTimer();
             return;
           }
         }
@@ -114,6 +135,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       if (savedDeviceId != null) {
         if (mounted) {
           setState(() {
+            _hasSavedDevice = true;
             _isConnectingDevice = true;
           });
         }
@@ -126,8 +148,15 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
             _isConnectingDevice = false;
           });
           _fetchStatusInBackground();
+          _armWifiStallTimer();
           return;
         }
+      } else if (mounted && _hasSavedDevice) {
+        // A previously-saved toy was forgotten elsewhere — fall back to the
+        // never-paired copy in the disconnected view.
+        setState(() {
+          _hasSavedDevice = false;
+        });
       }
 
       // Fall back to restoring connection (e.g., after hot restart)
@@ -145,6 +174,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         if (_connectedWifi == "Unknown" || _batteryLevel == "Unknown") {
           _fetchStatusInBackground();
         }
+        _armWifiStallTimer();
       } else {
         // No device found, show disconnected view immediately
         setState(() {
@@ -158,6 +188,18 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         });
       }
     }
+  }
+
+  // Owns the "you're done!" celebration: flip the flag AND kick off the
+  // animation here (not in build) so triggering it stays a deliberate action
+  // rather than a build side-effect. The success view only renders while the
+  // device is connected (see the build ternary).
+  void _activateSuccessCelebration() {
+    if (!mounted) return;
+    setState(() {
+      _showSuccessState = true;
+    });
+    _animationController.forward(from: 0);
   }
 
   Future<void> _fetchStatusInBackground() async {
@@ -189,6 +231,75 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     }
   }
 
+  // Re-read whether a uid-scoped toy is still saved, repainting only if the
+  // answer changed — keeps the disconnected view honest after a "forget device".
+  Future<void> _refreshSavedDeviceFlag() async {
+    final bool hasSaved = (await _bleManager.getSavedDeviceId()) != null;
+    if (!mounted || hasSaved == _hasSavedDevice) return;
+    setState(() {
+      _hasSavedDevice = hasSaved;
+    });
+  }
+
+  // Manual status refresh (pull-to-refresh, or the "couldn't check" retry): a
+  // fresh GATT read of the status characteristic, then re-arm the stall watch if
+  // we're still waiting on a first value.
+  Future<void> _refreshStatus() async {
+    try {
+      await _bleManager.readStatusUpdate();
+      if (!mounted) return;
+      setState(() {
+        _connectedWifi = _bleManager.connectedWifi;
+        _batteryLevel = _bleManager.batteryLevel.toString();
+        _wifiStatusStalled = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _connectedWifi = "Error";
+        _batteryLevel = "Error";
+        _wifiStatusStalled = false;
+      });
+    }
+    // Empty read (still "Unknown")? Re-arm the watchdog. Also cancels any prior timer.
+    _armWifiStallTimer();
+  }
+
+  // (Re)start the stall watchdog. Only arms while stuck on "Unknown" AND
+  // BLE-connected; a landed status (via wifiStatusStream) cancels it. Never call
+  // from build() — this schedules a timer.
+  void _armWifiStallTimer() {
+    _wifiStallTimer?.cancel();
+    if (_connectedWifi == "Unknown" && _bleManager.isConnected) {
+      _wifiStallTimer = Timer(const Duration(seconds: 12), () {
+        if (!mounted) return;
+        setState(() {
+          _wifiStatusStalled = true;
+        });
+      });
+    }
+  }
+
+  // Opens the pair/setup flow. Shared by the never-paired "Connect" button and
+  // the "Set up a different Smarty" fallback so the success-celebration and
+  // re-check handling lives in exactly one place.
+  void _openConnectionPage() {
+    setState(() {
+      _isConnectingDevice = true; // Show reconnecting view during user-initiated connection
+    });
+    Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (context) => SmartyConnectionPage()),
+    ).then((result) {
+      // `true` means WiFi was just set up — celebrate. Reconnecting an
+      // already-online toy pops with no result, so no confetti then.
+      if (result == true) {
+        _activateSuccessCelebration();
+      }
+      _checkForConnectedDevices();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     bool isDeviceConnected = _bleManager.isConnected;
@@ -214,7 +325,14 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     return _isConnectingDevice ? _buildReconnectingView() : _buildDisconnectedView();
   }
 
+  // A saved-but-unreachable toy gets a recovery path; a phone that has never
+  // paired gets the original invite. _hasSavedDevice is kept fresh by
+  // _checkForConnectedDevices and the wifiStatusStream listener.
   Widget _buildDisconnectedView() {
+    return _hasSavedDevice ? _buildCantFindDeviceView() : _buildNeverPairedView();
+  }
+
+  Widget _buildNeverPairedView() {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -244,17 +362,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
           ),
           SizedBox(height: 24),
           AnimatedScaleButton(
-            onPressed: () {
-              setState(() {
-                _isConnectingDevice = true; // Show reconnecting view during user-initiated connection
-              });
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => SmartyConnectionPage()),
-              ).then((_) {
-                _checkForConnectedDevices();
-              });
-            },
+            onPressed: _openConnectionPage,
             child: Container(
               padding: EdgeInsets.symmetric(horizontal: 24, vertical: 14),
               decoration: BoxDecoration(
@@ -290,70 +398,224 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
-  Widget _buildConnectedView() {
-    bool isWifiLoading = _connectedWifi == "Unknown";
-
-    return SingleChildScrollView(
+  // Shown when a toy is saved but the reconnect attempt failed — most likely the
+  // toy is off or out of range, not that setup never happened.
+  Widget _buildCantFindDeviceView() {
+    return Center(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(
-            padding: EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.blue.shade50,
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  padding: EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.blue.shade100,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Image.asset(
-                    'assets/images/icon.png',
-                    width: 24,
-                    height: 24,
-                  ),
-                ),
-                SizedBox(width: 12),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Smarty Connected',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.blue.shade900,
-                      ),
-                    ),
-                    SizedBox(height: 4),
-                    Text(
-                      isWifiLoading ? 'Fetching status...' : 'Ready to play',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.blue.shade700,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+          Image.asset(
+            'assets/images/icon.png',
+            width: 80,
+            height: 80,
           ),
           SizedBox(height: 20),
-          _buildStatusCard(
-            icon: isWifiLoading ? null : _bleManager.isWifiConnected ? Icons.wifi : Icons.wifi_off,
-            color: _bleManager.isWifiConnected ? Colors.green : Colors.orange,
-            title: isWifiLoading ? 'Checking WiFi...' : _bleManager.isWifiConnected ? 'WiFi: $_connectedWifi' : 'WiFi: Not connected',
-            isLoading: isWifiLoading,
+          Text(
+            "Can't find your Smarty",
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              color: Colors.grey.shade800,
+            ),
           ),
-          // NOTE: battery status card intentionally omitted — the device has no
-          // battery sensing yet (firmware returns a fixed placeholder), so showing
-          // a precise "%" would mislead parents (APP-7 / FW-21). Restore this card
-          // once real battery telemetry exists.
+          SizedBox(height: 12),
+          Text(
+            'It might be turned off or out of range. Turn it on, then try again.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 16,
+              color: Colors.grey.shade600,
+            ),
+          ),
+          SizedBox(height: 24),
+          AnimatedScaleButton(
+            onPressed: () {
+              _checkForConnectedDevices();
+            },
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade600,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.blue.shade200.withOpacity(0.4),
+                    blurRadius: 8,
+                    offset: Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.refresh, color: Colors.white, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'Try Again',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          SizedBox(height: 12),
+          TextButton(
+            onPressed: _openConnectionPage,
+            child: Text(
+              'Set up a different Smarty',
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.blue.shade600,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildConnectedView() {
+    return RefreshIndicator(
+      onRefresh: _refreshStatus,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade100,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Image.asset(
+                      'assets/images/icon.png',
+                      width: 24,
+                      height: 24,
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Smarty Connected',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.blue.shade900,
+                        ),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        _connectedSubtitle(),
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.blue.shade700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(height: 20),
+            _buildWifiStatusCard(),
+            // NOTE: battery status card intentionally omitted — the device has no
+            // battery sensing yet (firmware returns a fixed placeholder), so showing
+            // a precise "%" would mislead parents (APP-7 / FW-21). Restore this card
+            // once real battery telemetry exists.
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Honest one-liner under "Smarty Connected". Order matters: an errored/stalled
+  // read must not read as "Ready to play", and a stalled read is still literally
+  // "Unknown", so it's checked before the loading case.
+  String _connectedSubtitle() {
+    if (_connectedWifi == "Error" || _wifiStatusStalled) return 'Status unavailable';
+    if (_connectedWifi == "Unknown") return 'Fetching status...';
+    if (_bleManager.isWifiConnected) return 'Ready to play';
+    return 'WiFi setup needed';
+  }
+
+  // Four states: couldn't-check (stalled/errored, offers retry), still-loading,
+  // connected, and BLE-up-but-WiFi-down (offers a setup shortcut).
+  Widget _buildWifiStatusCard() {
+    if (_wifiStatusStalled || _connectedWifi == "Error") {
+      return _buildStatusCard(
+        icon: Icons.wifi_find,
+        color: Colors.orange,
+        title: "Couldn't check WiFi status",
+        isLoading: false,
+        trailing: IconButton(
+          icon: Icon(Icons.refresh, color: Colors.orange.shade700),
+          tooltip: 'Refresh',
+          onPressed: () {
+            setState(() {
+              _wifiStatusStalled = false;
+              _connectedWifi = "Unknown"; // show the spinner again while we retry
+            });
+            _refreshStatus();
+          },
+        ),
+      );
+    }
+
+    if (_connectedWifi == "Unknown") {
+      return _buildStatusCard(
+        icon: null,
+        color: Colors.orange,
+        title: 'Checking WiFi...',
+        isLoading: true,
+      );
+    }
+
+    if (_bleManager.isWifiConnected) {
+      return _buildStatusCard(
+        icon: Icons.wifi,
+        color: Colors.green,
+        title: 'WiFi: $_connectedWifi',
+        isLoading: false,
+      );
+    }
+
+    return _buildStatusCard(
+      icon: Icons.wifi_off,
+      color: Colors.orange,
+      title: 'WiFi: Not connected',
+      isLoading: false,
+      trailing: TextButton(
+        onPressed: () async {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(builder: (context) => WifiConfigPage()),
+          );
+          await _refreshStatus();
+        },
+        child: Text(
+          'Set up',
+          style: TextStyle(
+            color: Colors.orange.shade700,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ),
     );
   }
@@ -363,6 +625,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     required Color color,
     required String title,
     required bool isLoading,
+    Widget? trailing,
   }) {
     return Container(
       padding: EdgeInsets.all(12),
@@ -390,22 +653,23 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
                 )
               : Icon(icon, color: color, size: 20),
           SizedBox(width: 12),
-          Text(
-            title,
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey.shade800,
-              fontWeight: FontWeight.w500,
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey.shade800,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
+          if (trailing != null) trailing,
         ],
       ),
     );
   }
 
   Widget _buildSuccessView() {
-    _animationController.forward();
-
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,

@@ -3,6 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:app_settings/app_settings.dart';
 
+// Why a Smarty scan produced no devices — lets the connect UI show an
+// actionable fix (turn on Bluetooth / grant permission) instead of a dead-end
+// "nothing found". `none` means the scan ran normally (there just may be no
+// toy nearby / in pairing mode).
+enum BleScanIssue { none, bluetoothOff, permissionDenied, unsupported, unknown }
+
 class BleService {
   // BLE UUIDs
   static const String smartyServiceUuid = "0000abcd-0000-1000-8000-00805f9b34fb";
@@ -94,6 +100,11 @@ class BleService {
     await _openBluetoothSettings();
   }
 
+  // Open this app's own settings page, where the user can grant the Bluetooth
+  // permission they previously denied.
+  static Future<void> openAppPermissionSettings() =>
+      AppSettings.openAppSettings(type: AppSettingsType.settings);
+
   // Check if Bluetooth is ready for scanning
   static Future<bool> isBluetoothReady() async {
     BluetoothAdapterState state = await getBluetoothState();
@@ -179,41 +190,69 @@ class BleService {
     return controller.stream;
   }
   
-  // Scan for BLE devices with "Smarty" in the name and call a callback for each discovered device
-  static Future<void> scanForSmartyDevicesWithCallback(Function(ScanResult) onDeviceDiscovered) async {
-    if (!await isBluetoothReady()) {
-      print("⚠️ Bluetooth is not ready for scanning");
-      return;
+  // Scan for BLE devices with "Smarty" in the name and call a callback for each
+  // discovered device. Returns WHY the scan found nothing (BleScanIssue.none on
+  // a normal scan) so the caller can steer the user to fix a Bluetooth/
+  // permission dead-end instead of showing a silent "nothing found".
+  static Future<BleScanIssue> scanForSmartyDevicesWithCallback(Function(ScanResult) onDeviceDiscovered) async {
+    // Classify blockers BEFORE scanning so we never mistake "can't scan" for
+    // "no toy nearby".
+    if (!await FlutterBluePlus.isSupported) {
+      print("⚠️ Bluetooth is not supported on this device");
+      return BleScanIssue.unsupported;
     }
-    
-    // Stop any ongoing scan first
-    await FlutterBluePlus.stopScan();
-    
-    // Start a new scan
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
-    print("✅ Started scanning for BLE devices with callback");
-    
-    // Subscribe to scan results
-    var subscription = FlutterBluePlus.scanResults.listen((results) {
-      final smartyResults = results
-          .where(
-            (result) =>
-                result.device.platformName.isNotEmpty &&
-                result.device.platformName.toLowerCase().contains("smarty"),
-          )
-          .toList();
+    final BluetoothAdapterState state = await FlutterBluePlus.adapterState.first;
+    if (state == BluetoothAdapterState.off ||
+        state == BluetoothAdapterState.turningOff) {
+      print("⚠️ Bluetooth is off — cannot scan");
+      return BleScanIssue.bluetoothOff;
+    }
+    if (state == BluetoothAdapterState.unauthorized) {
+      print("⚠️ Bluetooth permission denied — cannot scan");
+      return BleScanIssue.permissionDenied;
+    }
 
-      // Call the callback for each Smarty device
-      for (var result in smartyResults) {
-        onDeviceDiscovered(result);
-      }
-    });
-
-    // Wait for scan to complete and then cancel subscription
+    StreamSubscription? subscription;
     try {
+      // Stop any ongoing scan first
+      await FlutterBluePlus.stopScan();
+
+      // Start a new scan
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+      print("✅ Started scanning for BLE devices with callback");
+
+      // Subscribe to scan results
+      subscription = FlutterBluePlus.scanResults.listen((results) {
+        final smartyResults = results
+            .where(
+              (result) =>
+                  result.device.platformName.isNotEmpty &&
+                  result.device.platformName.toLowerCase().contains("smarty"),
+            )
+            .toList();
+
+        // Call the callback for each Smarty device
+        for (var result in smartyResults) {
+          onDeviceDiscovered(result);
+        }
+      });
+
+      // Wait for scan to complete
       await Future.delayed(const Duration(seconds: 5));
+      return BleScanIssue.none;
+    } catch (e) {
+      // flutter_blue_plus requests Android runtime permissions on startScan and
+      // THROWS when they're denied — classify that so the caller can point the
+      // user at app settings rather than a generic error.
+      final String msg = e.toString().toLowerCase();
+      if (msg.contains('permission') || msg.contains('denied')) {
+        print("⚠️ Scan blocked by permission: $e");
+        return BleScanIssue.permissionDenied;
+      }
+      print("❌ Error in scanForSmartyDevicesWithCallback: $e");
+      return BleScanIssue.unknown;
     } finally {
-      subscription.cancel();
+      subscription?.cancel();
       await FlutterBluePlus.stopScan();
     }
   }

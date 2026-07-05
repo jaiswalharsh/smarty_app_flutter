@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/wifi_utils.dart';
@@ -9,18 +10,27 @@ import 'ble_service.dart';
 /// Outcome of a Wi-Fi provisioning attempt, derived from the device's own status
 /// characteristic — NOT merely from the BLE credential write being acknowledged.
 enum WifiProvisionResult {
-  connected,      // device reported it joined the target SSID (got an IP)
-  wrongPassword,  // device reported "Auth Failed"
-  failed,         // device reported a non-auth connection failure
-  timeout,        // no definitive status within the wait window
-  writeError,     // couldn't even deliver the credentials over BLE
+  connected,        // device reported it joined the target SSID (got an IP)
+  wrongPassword,    // device reported "Auth Failed"
+  failed,           // device reported a non-auth connection failure
+  bleDisconnected,  // the BLE link to the toy dropped — a join result can't arrive
+  timeout,          // no definitive status within the wait window
+  writeError,       // couldn't even deliver the credentials over BLE
 }
 
 // A singleton class to manage BLE connections and data
 class BleManager {
-  // Saved device persistence keys
-  static const String _savedDeviceIdKey = 'smarty_saved_device_id';
-  static const String _savedDeviceNameKey = 'smarty_saved_device_name';
+  // Legacy device-global persistence keys (pre per-user scoping). Kept only for
+  // one-time migration into the uid-scoped keys below — a second account on the
+  // same phone must not inherit the first account's saved toy.
+  static const String _legacyDeviceIdKey = 'smarty_saved_device_id';
+  static const String _legacyDeviceNameKey = 'smarty_saved_device_name';
+  String _deviceIdKeyFor(String uid) => 'smarty_saved_device_id_$uid';
+  String _deviceNameKeyFor(String uid) => 'smarty_saved_device_name_$uid';
+
+  // Current Firebase uid, or null when signed out. Firebase.initializeApp is
+  // awaited in main() before runApp, so this is safe to read on demand.
+  String? get _uid => FirebaseAuth.instance.currentUser?.uid;
 
   // Singleton instance
   static final BleManager _instance = BleManager._internal();
@@ -68,6 +78,9 @@ class BleManager {
   // Status information
   String _connectedWifi = "Unknown";
   int _batteryLevel = 0;
+  // null = firmware predates the "registered" status field (deployed toys);
+  // callers must treat null as unknown, not as unregistered.
+  bool? _deviceRegistered;
 
   // Stream controllers for status updates
   final _wifiStatusController = StreamController<String>.broadcast();
@@ -80,6 +93,7 @@ class BleManager {
   BluetoothService? get smartyService => _smartyService;
   String get connectedWifi => _connectedWifi;
   int get batteryLevel => _batteryLevel;
+  bool? get deviceRegistered => _deviceRegistered;
   Stream<String> get wifiStatusStream => _wifiStatusController.stream;
   Stream<int> get batteryStatusStream => _batteryStatusController.stream;
   Stream<String> get wifiStatusMessageStream =>
@@ -263,6 +277,7 @@ class BleManager {
     _deviceSecretCharacteristic = null;
     _deviceInfoCharacteristic = null;
     _connectedWifi = "NotConnected";
+    _deviceRegistered = null;
     _connectedDevice = null;
   }
 
@@ -469,6 +484,9 @@ class BleManager {
           String message = WifiUtils.getWifiStatusMessage(wifiName);
           _wifiStatusMessageController.add(message);
         }
+
+        final reg = jsonData['registered'];
+        if (reg is bool) _deviceRegistered = reg;
         
         // Extract battery level
         if (jsonData.containsKey('battery')) {
@@ -678,6 +696,12 @@ class BleManager {
     }
   }
 
+  // Firmware needs ~4 connect cycles to emit "Connection Failed" for an absent
+  // AP; the old 20 s window expired before the real verdict arrived, so the
+  // parent got a misleading "still connecting" while a definitive answer was
+  // seconds away.
+  static const Duration _wifiProvisionTimeout = Duration(seconds: 45);
+
   /// Send Wi-Fi credentials AND wait for the device to report the real outcome.
   ///
   /// The plain [connectToWifi] returns as soon as the BLE write is acknowledged,
@@ -690,7 +714,7 @@ class BleManager {
   Future<WifiProvisionResult> connectToWifiAndAwait(
     String ssid,
     String password, {
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = _wifiProvisionTimeout,
   }) async {
     if (_wifiCredsCharacteristic == null) {
       print("❌ BleManager: WiFi credentials characteristic not found");
@@ -708,8 +732,15 @@ class BleManager {
         if (!completer.isCompleted) completer.complete(WifiProvisionResult.wrongPassword);
       } else if (s == 'Connection Failed' || s == 'No credentials') {
         if (!completer.isCompleted) completer.complete(WifiProvisionResult.failed);
-      } else if (s == ssid) {
-        // On IP_EVENT_STA_GOT_IP the device reports the joined SSID as its status.
+      } else if (s == 'NotConnected') {
+        // The BLE link to the toy dropped — a join result can never arrive now,
+        // so resolve immediately instead of waiting out the full timeout.
+        if (!completer.isCompleted) completer.complete(WifiProvisionResult.bleDisconnected);
+      } else if (s == ssid ||
+          (ssid.length > 31 && s == ssid.substring(0, 31))) {
+        // On IP_EVENT_STA_GOT_IP the device reports the joined SSID as its
+        // status. Deployed firmware truncates the SSID to 31 chars, so a full
+        // 32-char SSID never matched exactly — accept the 31-char prefix too.
         if (!completer.isCompleted) completer.complete(WifiProvisionResult.connected);
       }
       // Transient states ("Initializing", "Reconnecting") are ignored — we keep
@@ -756,7 +787,7 @@ class BleManager {
   }
 
   // Scan for WiFi networks
-  Future<List<String>> scanWifiNetworks() async {
+  Future<List<WifiNetwork>> scanWifiNetworks() async {
     // Defensive: if the cached table was refreshed lazily (or the Service
     // Changed listener hasn't fired yet), try one re-discovery before giving up.
     if (_wifiScanCharacteristic == null) {
@@ -771,7 +802,7 @@ class BleManager {
     StreamSubscription<List<int>>? subscription;
     try {
       // Set up a completer to wait for scan results
-      Completer<List<String>> completer = Completer<List<String>>();
+      Completer<List<WifiNetwork>> completer = Completer<List<WifiNetwork>>();
       List<String> networkEntries = [];
       bool receivedEndMarker = false;
       int expectedNetworks = 0;
@@ -813,7 +844,7 @@ class BleManager {
           // Complete the future with all collected networks
           if (!completer.isCompleted) {
             // Process all collected entries
-            List<String> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
+            List<WifiNetwork> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
             completer.complete(networks);
             subscription?.cancel();
           }
@@ -828,7 +859,7 @@ class BleManager {
             (expectedNetworks > 0 && networkEntries.length > expectedNetworks + 5)) {
           if (!completer.isCompleted) {
             // print("📶 BleManager: Received all expected networks or more than expected");
-            List<String> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
+            List<WifiNetwork> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
             completer.complete(networks);
             subscription?.cancel();
           }
@@ -863,7 +894,7 @@ class BleManager {
           print("⏱️ BleManager: WiFi scan timeout reached");
           if (networkEntries.isNotEmpty) {
             // Process whatever entries we have received
-            List<String> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
+            List<WifiNetwork> networks = WifiUtils.processWifiScanData(networkEntries.join('\n'));
             completer.complete(networks);
           } else {
             completer.complete([]);
@@ -971,60 +1002,112 @@ class BleManager {
 
   // Save device ID for auto-reconnect
   Future<void> _saveDeviceId(BluetoothDevice device) async {
+    final uid = _uid;
+    if (uid == null) {
+      // No signed-in user — never persist to a device-global key.
+      print("BleManager: Skipped saving device — no signed-in user");
+      return;
+    }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_savedDeviceIdKey, device.remoteId.str);
-    await prefs.setString(_savedDeviceNameKey, device.platformName);
+    await prefs.setString(_deviceIdKeyFor(uid), device.remoteId.str);
+    await prefs.setString(_deviceNameKeyFor(uid), device.platformName);
     print("BleManager: Saved device for auto-reconnect: ${device.platformName} (${device.remoteId.str})");
   }
 
   // Get saved device ID
   Future<String?> getSavedDeviceId() async {
+    final uid = _uid;
+    if (uid == null) return null;
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_savedDeviceIdKey);
+    // Fall back to the legacy global key so a tester who saved a toy before
+    // per-user scoping still triggers auto-reconnect (which does the migration).
+    return prefs.getString(_deviceIdKeyFor(uid)) ??
+        prefs.getString(_legacyDeviceIdKey);
   }
 
   // Clear saved device
   Future<void> clearSavedDevice() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_savedDeviceIdKey);
-    await prefs.remove(_savedDeviceNameKey);
+    final uid = _uid;
+    if (uid != null) {
+      await prefs.remove(_deviceIdKeyFor(uid));
+      await prefs.remove(_deviceNameKeyFor(uid));
+    }
+    // Also drop the legacy global keys so a forgotten toy can't linger there.
+    await prefs.remove(_legacyDeviceIdKey);
+    await prefs.remove(_legacyDeviceNameKey);
     print("BleManager: Cleared saved device");
   }
 
   // Disconnect and forget the saved device
   Future<void> disconnectAndForget() async {
+    final device = _connectedDevice;
+    // Reset FIRST: cancels the connection-state listener so the intentional
+    // disconnect below doesn't fire the disconnect handler, whose
+    // _attemptAutoReconnect would reconnect the device we're forgetting.
+    _resetConnectionState();
     try {
-      if (_connectedDevice != null) {
+      if (device != null) {
         // Remove OS-level bond on Android (iOS manages bonds internally)
         if (Platform.isAndroid) {
           try {
-            await _connectedDevice!.removeBond();
+            await device.removeBond();
             print("BleManager: Bond removed on Android");
           } catch (e) {
             print("BleManager: Bond removal failed: $e");
           }
         }
-        await _connectedDevice!.disconnect();
+        await device.disconnect();
       }
     } catch (e) {
       print("BleManager: Error disconnecting: $e");
     }
-    _resetConnectionState();
     await clearSavedDevice();
     _wifiStatusController.add("NotConnected");
     _wifiStatusMessageController.add("Device forgotten");
   }
 
+  Future<bool>? _autoReconnectFuture;
+
+  // Concurrent callers (Home's device check, the connection page, the
+  // disconnect handler) share one attempt instead of stacking parallel
+  // connect() calls to the same device.
+  Future<bool> autoReconnectToSavedDevice() {
+    return _autoReconnectFuture ??= _autoReconnectToSavedDeviceImpl()
+        .whenComplete(() => _autoReconnectFuture = null);
+  }
+
   // Auto-reconnect to previously saved device
-  Future<bool> autoReconnectToSavedDevice() async {
+  Future<bool> _autoReconnectToSavedDeviceImpl() async {
     try {
+      final uid = _uid;
+      if (uid == null) return false;
+
       final prefs = await SharedPreferences.getInstance();
-      final savedId = prefs.getString(_savedDeviceIdKey);
-      final savedName = prefs.getString(_savedDeviceNameKey) ?? "Smarty";
+      String? savedId = prefs.getString(_deviceIdKeyFor(uid));
+      String? savedName = prefs.getString(_deviceNameKeyFor(uid));
+
+      // One-time migration from the pre per-user global keys: attribute the
+      // legacy saved toy to the first account that reconnects after the update,
+      // then remove the legacy keys so no other account inherits it.
+      if (savedId == null) {
+        final legacyId = prefs.getString(_legacyDeviceIdKey);
+        if (legacyId != null) {
+          savedId = legacyId;
+          savedName = prefs.getString(_legacyDeviceNameKey);
+          await prefs.setString(_deviceIdKeyFor(uid), legacyId);
+          if (savedName != null) {
+            await prefs.setString(_deviceNameKeyFor(uid), savedName);
+          }
+          await prefs.remove(_legacyDeviceIdKey);
+          await prefs.remove(_legacyDeviceNameKey);
+        }
+      }
 
       if (savedId == null) {
         return false;
       }
+      savedName ??= "Smarty";
 
       print("BleManager: Attempting auto-reconnect to $savedName ($savedId)");
 
@@ -1059,16 +1142,23 @@ class BleManager {
     }
   }
 
-  // Dispose resources
-  void dispose() {
-    _connectionStateSubscription?.cancel();
-    _connectionStateSubscription = null;
-    _statusNotificationSubscription?.cancel();
-    _statusNotificationSubscription = null;
-    // Close stream controllers
-    _wifiStatusController.close();
-    _batteryStatusController.close();
-    _wifiStatusMessageController.close();
-    _showSnackBarController.close();
+  /// Tear down the current BLE session without killing the singleton.
+  /// The stream controllers are process-lifetime and must NEVER be closed:
+  /// this singleton survives logout/login, and closed broadcast controllers
+  /// cannot be reopened (closing them here bricked BLE until app restart).
+  Future<void> disconnectAndReset() async {
+    final device = _connectedDevice;
+    // Reset FIRST: cancels the connection-state listener so the intentional
+    // disconnect below doesn't fire the disconnect handler (snackbar +
+    // _attemptAutoReconnect would reconnect right after logout).
+    _resetConnectionState();
+    _wifiStatusController.add("NotConnected");
+    if (device != null) {
+      try {
+        await device.disconnect();
+      } catch (e) {
+        print("BleManager: Error disconnecting during reset: $e");
+      }
+    }
   }
 }

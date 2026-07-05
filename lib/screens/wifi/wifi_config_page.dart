@@ -4,7 +4,11 @@ import '../../services/ble_manager.dart';
 import 'wifi_network_page.dart';
 
 class WifiConfigPage extends StatefulWidget {
-  const WifiConfigPage({super.key});
+  // The device-setup flow pops the whole WiFi stack on success so the caller can
+  // celebrate; the Settings flow stays put and just refreshes its status card.
+  final bool popOnSuccess;
+
+  const WifiConfigPage({super.key, this.popOnSuccess = false});
 
   @override
   WifiConfigPageState createState() => WifiConfigPageState();
@@ -89,10 +93,30 @@ class WifiConfigPageState extends State<WifiConfigPage> {
   // Navigate to WiFi network page
   Future<void> _navigateToWifiNetworkPage() async {
     if (_bleManager.isConnected) {
-      Navigator.push(
+      // WifiNetworkPage pops `true` once the toy has actually joined a network.
+      final ok = await Navigator.push<bool>(
         context,
         MaterialPageRoute(builder: (context) => WifiNetworkPage()),
       );
+      if (!mounted) return;
+      if (ok == true) {
+        if (widget.popOnSuccess) {
+          Navigator.pop(context, true);
+          return;
+        }
+        // Settings flow: stay here and refresh the displayed WiFi status.
+        await _bleManager.readStatusUpdate();
+        if (!mounted) return;
+        setState(() {
+          _currentWifiName = _bleManager.connectedWifi;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Smarty is connected to Wi-Fi!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
     } else {
       setState(() {
         _currentWifiName = 'Smarty service not found.';
