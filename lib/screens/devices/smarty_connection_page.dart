@@ -288,10 +288,30 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       _handleConnectionSuccess(device);
     } catch (e) {
       if (!mounted) return;
+      final String name =
+          device.platformName.isNotEmpty ? device.platformName : 'Smarty';
       setState(() {
-        if (e is TimeoutException || e.toString().contains('timed out')) {
+        // FlutterBluePlus reports a connect timeout as "Timed out after 10s"
+        // (capital T) with fbp-code: 1 — the old lowercase 'timed out' check
+        // missed it, so users saw a raw FlutterBluePlusException instead.
+        final String err = e.toString().toLowerCase();
+        if (e is TimeoutException ||
+            err.contains('timed out') ||
+            err.contains('fbp-code: 1')) {
+          // A connect timeout is usually one of two things: the toy is
+          // out of range, OR the phone holds a stale bond — after the toy
+          // clears its keys on pairing, the OS keeps reconnecting with the
+          // old key and the encrypted link never completes (an SMP timeout).
+          // The app can't distinguish them, so guide the user through both.
+          // The "forget the device" path differs per platform.
+          final String forgetStep = Platform.isIOS
+              ? 'open iOS Settings → Bluetooth, tap the ⓘ next to $name, and '
+                  'choose "Forget This Device"'
+              : 'open Settings → Connected devices (Bluetooth), tap $name, and '
+                  'choose "Unpair"';
           _connectionResult =
-              'Connection timed out. Device may be out of range.';
+              'Couldn\'t connect to $name. Make sure it\'s powered on and '
+              'nearby. If it keeps failing, $forgetStep, then pair again.';
         } else {
           _connectionResult = 'Failed to connect: $e';
         }
