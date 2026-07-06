@@ -95,86 +95,24 @@ class WifiUtils {
     }
   }
 
-  // Show password dialog for WiFi connection
+  // Show password dialog for WiFi connection.
+  //
+  // The controller is owned by the dialog's State (_PasswordDialog) and disposed
+  // in its dispose(), which Flutter runs only after the route has fully left the
+  // tree. This keeps the APP-9 leak fixed (a controller was once created inside
+  // the builder and never disposed) while avoiding the use-after-dispose crash
+  // that disposing right after `await showDialog` caused: the route still
+  // rebuilds during its exit transition as the keyboard dismisses, re-subscribing
+  // the TextField to what would be a freed controller.
   static Future<String?> showPasswordDialog(
     BuildContext context,
     String network,
-  ) async {
-    // Owned here (not inside the builder) so it can be disposed after the dialog
-    // resolves — the previous version leaked a TextEditingController per dialog (APP-9).
-    final TextEditingController passwordController = TextEditingController();
-    bool obscure = true;
-    String? errorText;
-
-    final result = await showDialog<String?>(
+  ) {
+    return showDialog<String>(
       context: context,
       barrierDismissible: false,
-      builder: (BuildContext dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setLocalState) {
-            // A secured network needs a key. An empty submit used to no-op
-            // silently, leaving the parent stuck — reject it with a hint.
-            void submit() {
-              if (passwordController.text.isEmpty) {
-                setLocalState(() => errorText = 'Please enter the password');
-                return;
-              }
-              Navigator.of(dialogContext).pop(passwordController.text);
-            }
-
-            return AlertDialog(
-              title: Text('Connect to $network'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: passwordController,
-                      decoration: InputDecoration(
-                        labelText: 'WiFi Password',
-                        border: const OutlineInputBorder(),
-                        errorText: errorText,
-                        suffixIcon: IconButton(
-                          icon: Icon(obscure
-                              ? Icons.visibility_off
-                              : Icons.visibility),
-                          tooltip: obscure ? 'Show password' : 'Hide password',
-                          onPressed: () =>
-                              setLocalState(() => obscure = !obscure),
-                        ),
-                      ),
-                      obscureText: obscure,
-                      autofocus: true,
-                      onChanged: (_) {
-                        if (errorText != null) {
-                          setLocalState(() => errorText = null);
-                        }
-                      },
-                      onSubmitted: (_) => submit(),
-                    ),
-                  ],
-                ),
-              ),
-              actions: <Widget>[
-                TextButton(
-                  child: Text('Cancel'),
-                  onPressed: () {
-                    Navigator.of(dialogContext).pop(null);
-                  },
-                ),
-                TextButton(
-                  onPressed: submit,
-                  child: Text('Connect'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+      builder: (_) => _PasswordDialog(network: network),
     );
-
-    passwordController.dispose();
-    return result;
   }
 
   // Get a user-friendly message based on WiFi status.
@@ -206,5 +144,85 @@ class WifiUtils {
           return "Connected to $wifiStatus";
         }
     }
+  }
+}
+
+// See showPasswordDialog: the controller lives here so it is disposed only after
+// the route unmounts, keeping the APP-9 leak fixed without the use-after-dispose
+// crash. Pops the password on submit, null on cancel.
+class _PasswordDialog extends StatefulWidget {
+  const _PasswordDialog({required this.network});
+
+  final String network;
+
+  @override
+  State<_PasswordDialog> createState() => _PasswordDialogState();
+}
+
+class _PasswordDialogState extends State<_PasswordDialog> {
+  final TextEditingController passwordController = TextEditingController();
+  bool obscure = true;
+  String? errorText;
+
+  @override
+  void dispose() {
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  // A secured network needs a key. An empty submit used to no-op silently,
+  // leaving the parent stuck — reject it with a hint.
+  void _submit() {
+    if (passwordController.text.isEmpty) {
+      setState(() => errorText = 'Please enter the password');
+      return;
+    }
+    Navigator.of(context).pop(passwordController.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Connect to ${widget.network}'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: passwordController,
+              decoration: InputDecoration(
+                labelText: 'WiFi Password',
+                border: const OutlineInputBorder(),
+                errorText: errorText,
+                suffixIcon: IconButton(
+                  icon: Icon(
+                      obscure ? Icons.visibility_off : Icons.visibility),
+                  tooltip: obscure ? 'Show password' : 'Hide password',
+                  onPressed: () => setState(() => obscure = !obscure),
+                ),
+              ),
+              obscureText: obscure,
+              autofocus: true,
+              onChanged: (_) {
+                if (errorText != null) {
+                  setState(() => errorText = null);
+                }
+              },
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          child: const Text('Cancel'),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        TextButton(
+          onPressed: _submit,
+          child: const Text('Connect'),
+        ),
+      ],
+    );
   }
 }

@@ -220,97 +220,14 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   // Manual entry for hidden APs (not in the scan) and for open hidden networks
   // (empty password allowed). Same comma limitation as a listed network.
   Future<void> _showHiddenNetworkDialog() async {
-    final TextEditingController ssidController = TextEditingController();
-    final TextEditingController passwordController = TextEditingController();
-    bool obscure = true;
-    String? ssidError;
-
-    final bool? submitted = await showDialog<bool>(
+    final (String, String)? result = await showDialog<(String, String)>(
       context: context,
       barrierDismissible: false,
-      builder: (BuildContext dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setLocalState) {
-            void submit() {
-              final String ssid = ssidController.text.trim();
-              if (ssid.isEmpty) {
-                setLocalState(
-                    () => ssidError = 'Please enter the network name');
-                return;
-              }
-              if (ssid.contains(',')) {
-                setLocalState(
-                    () => ssidError = "Names with a comma aren't supported yet");
-                return;
-              }
-              Navigator.of(dialogContext).pop(true);
-            }
-
-            return AlertDialog(
-              title: const Text('Join a hidden network'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: ssidController,
-                      decoration: InputDecoration(
-                        labelText: 'Network name (SSID)',
-                        border: const OutlineInputBorder(),
-                        errorText: ssidError,
-                      ),
-                      autofocus: true,
-                      onChanged: (_) {
-                        if (ssidError != null) {
-                          setLocalState(() => ssidError = null);
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: passwordController,
-                      decoration: InputDecoration(
-                        labelText: 'Password (leave empty if none)',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          icon: Icon(obscure
-                              ? Icons.visibility_off
-                              : Icons.visibility),
-                          tooltip:
-                              obscure ? 'Show password' : 'Hide password',
-                          onPressed: () =>
-                              setLocalState(() => obscure = !obscure),
-                        ),
-                      ),
-                      obscureText: obscure,
-                      onSubmitted: (_) => submit(),
-                    ),
-                  ],
-                ),
-              ),
-              actions: <Widget>[
-                TextButton(
-                  child: const Text('Cancel'),
-                  onPressed: () => Navigator.of(dialogContext).pop(false),
-                ),
-                TextButton(
-                  onPressed: submit,
-                  child: const Text('Join'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+      builder: (_) => const _HiddenNetworkDialog(),
     );
-
-    final String ssid = ssidController.text.trim();
-    final String password = passwordController.text;
-    ssidController.dispose();
-    passwordController.dispose();
-
-    if (submitted != true) return;
+    if (result == null) return; // cancelled
     if (!mounted) return;
+    final (String ssid, String password) = result;
     await _provision(ssid, password);
   }
 
@@ -491,6 +408,102 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
           ),
         ),
       ),
+    );
+  }
+}
+
+// Extracted into its own widget so its State owns the TextEditingControllers and
+// disposes them in dispose(), which Flutter runs only after the dialog route has
+// fully left the tree. Disposing them right after `await showDialog` returned
+// instead crashed with "used after being disposed": the route keeps rebuilding
+// during its exit transition as the keyboard dismisses (animating
+// MediaQuery.viewInsets), re-subscribing the TextField to a freed controller.
+// Owning them here keeps the APP-9 leak fixed without that race. On success we
+// pop the entered values so the caller never touches the controllers.
+class _HiddenNetworkDialog extends StatefulWidget {
+  const _HiddenNetworkDialog();
+
+  @override
+  State<_HiddenNetworkDialog> createState() => _HiddenNetworkDialogState();
+}
+
+class _HiddenNetworkDialogState extends State<_HiddenNetworkDialog> {
+  final TextEditingController ssidController = TextEditingController();
+  final TextEditingController passwordController = TextEditingController();
+  bool obscure = true;
+  String? ssidError;
+
+  @override
+  void dispose() {
+    ssidController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final String ssid = ssidController.text.trim();
+    if (ssid.isEmpty) {
+      setState(() => ssidError = 'Please enter the network name');
+      return;
+    }
+    if (ssid.contains(',')) {
+      setState(() => ssidError = "Names with a comma aren't supported yet");
+      return;
+    }
+    Navigator.of(context).pop((ssid, passwordController.text));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Join a hidden network'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: ssidController,
+              decoration: InputDecoration(
+                labelText: 'Network name (SSID)',
+                border: const OutlineInputBorder(),
+                errorText: ssidError,
+              ),
+              autofocus: true,
+              onChanged: (_) {
+                if (ssidError != null) {
+                  setState(() => ssidError = null);
+                }
+              },
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: passwordController,
+              decoration: InputDecoration(
+                labelText: 'Password (leave empty if none)',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                      obscure ? Icons.visibility_off : Icons.visibility),
+                  tooltip: obscure ? 'Show password' : 'Hide password',
+                  onPressed: () => setState(() => obscure = !obscure),
+                ),
+              ),
+              obscureText: obscure,
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          child: const Text('Cancel'),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        TextButton(
+          onPressed: _submit,
+          child: const Text('Join'),
+        ),
+      ],
     );
   }
 }
