@@ -46,9 +46,18 @@ class BleService {
     return ready;
   }
 
-  // Check if Bluetooth is available and enabled
+  // Check if Bluetooth is available and enabled.
+  // Waits up to 3 seconds for CoreBluetooth to leave the "unknown" state
+  // before returning, avoiding false negatives on cold launch.
   static Future<BluetoothAdapterState> getBluetoothState() async {
-    return await FlutterBluePlus.adapterState.first;
+    final state = await FlutterBluePlus.adapterState.first;
+    if (state != BluetoothAdapterState.unknown) return state;
+
+    // CoreBluetooth hasn't initialized yet — wait for a definitive state
+    return await FlutterBluePlus.adapterState
+        .firstWhere((s) => s != BluetoothAdapterState.unknown)
+        .timeout(const Duration(seconds: 3),
+            onTimeout: () => BluetoothAdapterState.off);
   }
 
   // Stream to monitor Bluetooth state changes

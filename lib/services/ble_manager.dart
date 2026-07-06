@@ -918,9 +918,15 @@ class BleManager {
   // Restore connection after hot restart
   Future<bool> restoreConnectionsAfterHotRestart() async {
     try {
+      // Wait for Bluetooth to be ready before querying devices
+      if (!await BleService.isBluetoothReady()) {
+        print("⚠️ BleManager: Bluetooth not ready, skipping hot-restart restore");
+        return false;
+      }
+
       // Get connected devices from BLE service
       List<BluetoothDevice> devices = await BleService.getConnectedDevices();
-      
+
       if (devices.isNotEmpty) {
         // Use the first found device
         BluetoothDevice device = devices.first;
@@ -1112,6 +1118,12 @@ class BleManager {
       print("BleManager: Attempting auto-reconnect to $savedName ($savedId)");
 
       final device = BluetoothDevice.fromId(savedId);
+
+      // Wait for Bluetooth to be ready before attempting anything
+      if (!await BleService.isBluetoothReady()) {
+        print("BleManager: Bluetooth not ready, skipping auto-reconnect");
+        return false;
+      }
 
       // Check if already connected at OS level
       if ((await device.connectionState.first) == BluetoothConnectionState.connected) {
