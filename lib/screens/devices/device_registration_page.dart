@@ -1,6 +1,30 @@
 import 'package:flutter/material.dart';
-import '../../services/device_registration_service.dart';
 
+import '../../services/auth_service.dart';
+import '../../services/ble_manager.dart';
+import '../../services/device_registration_service.dart';
+import '../auth/login_page.dart';
+
+/// How the account link ended — the result [DeviceRegistrationPage] pops.
+/// (Popped with no result — the back button — means the same as [later].)
+enum LinkResult {
+  /// The toy is linked to this account (secret written to the toy).
+  linked,
+
+  /// The parent chose "Not now": setup carries on, Home offers
+  /// "Finish setup" later.
+  later,
+
+  /// The toy is already linked to ANOTHER account (409). Setup must stop;
+  /// the caller forgets the toy.
+  ownedElsewhere,
+}
+
+/// Links the connected toy to the signed-in parent's account.
+///
+/// Pops a [LinkResult]: [LinkResult.linked] on success, [LinkResult.later]
+/// when the parent backs out, [LinkResult.ownedElsewhere] when the toy
+/// belongs to another account.
 class DeviceRegistrationPage extends StatefulWidget {
   const DeviceRegistrationPage({super.key});
 
@@ -8,13 +32,16 @@ class DeviceRegistrationPage extends StatefulWidget {
   State<DeviceRegistrationPage> createState() => _DeviceRegistrationPageState();
 }
 
-class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
-  final DeviceRegistrationService _registrationService = DeviceRegistrationService();
+enum _Phase { working, done, failed }
 
-  String _status = 'Preparing registration...';
-  int _currentStep = 0; // 0=reading, 1=registering, 2=writing, 3=done, -1=error
+class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
+  final DeviceRegistrationService _registrationService =
+      DeviceRegistrationService();
+
+  _Phase _phase = _Phase.working;
+  RegistrationFailure? _failure;
   String? _errorMessage;
-  bool _isRegistering = false;
+  bool _busy = false;
 
   @override
   void initState() {
@@ -22,235 +49,220 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
     _startRegistration();
   }
 
+  void _fail(RegistrationFailure failure, [String? message]) {
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.failed;
+      _failure = failure;
+      _errorMessage = message ?? failure.message;
+    });
+  }
+
   Future<void> _startRegistration() async {
-    if (_isRegistering) return;
-    _isRegistering = true;
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _phase = _Phase.working;
+      _failure = null;
+      _errorMessage = null;
+    });
 
     try {
-      // Step 1: Read device_id
-      if (!mounted) return;
-      setState(() {
-        _currentStep = 0;
-        _status = 'Reading device ID...';
-      });
-
       final deviceId = await _registrationService.readDeviceId();
       if (!mounted) return;
       if (deviceId == null || deviceId.isEmpty || deviceId == '{}') {
-        setState(() {
-          _currentStep = -1;
-          _errorMessage = 'Could not read device ID. Make sure the device is connected.';
-        });
+        _fail(RegistrationFailure.deviceUnreachable);
         return;
       }
-
-      // Step 2: Register with Cloud Function
-      setState(() {
-        _currentStep = 1;
-        _status = 'Registering device...';
-      });
 
       final result = await _registrationService.registerDevice(deviceId);
       if (!mounted) return;
       if (!result.ok) {
-        setState(() {
-          _currentStep = -1;
-          _errorMessage = result.error ?? 'Device registration failed. Please try again.';
-        });
+        _fail(result.failure ?? RegistrationFailure.unknown, result.message);
         return;
       }
-      final secret = result.secret!;
 
-      // Step 3: Write secret to device
-      setState(() {
-        _currentStep = 2;
-        _status = 'Saving to device...';
-      });
-
-      final written = await _registrationService.writeSecretToDevice(secret);
+      final written =
+          await _registrationService.writeSecretToDevice(result.secret!);
       if (!mounted) return;
       if (!written) {
-        setState(() {
-          _currentStep = -1;
-          _errorMessage = 'Failed to save registration to device. Please try again.';
-        });
+        _fail(RegistrationFailure.deviceUnreachable);
         return;
       }
+      // The firmware doesn't re-notify status on the secret write, so flip
+      // the local flag here — whoever pushed this page sees it immediately.
+      BleManager().markRegistered();
 
-      // Done
-      setState(() {
-        _currentStep = 3;
-        _status = 'Registration complete!';
-      });
-
-      // Auto-close after brief delay
-      await Future.delayed(const Duration(seconds: 2));
+      setState(() => _phase = _Phase.done);
+      await Future.delayed(const Duration(milliseconds: 800));
       if (mounted) {
-        Navigator.of(context).pop(true);
+        Navigator.of(context).pop(LinkResult.linked);
       }
     } catch (e) {
-      // Safety net: any unexpected throw (e.g. getIdToken() failing during an
-      // offline token refresh) must surface as an error — never leave the
-      // progress screen spinning forever.
+      // Safety net: any unexpected throw must surface as an error — never
+      // leave the progress screen spinning forever.
       debugPrint('DeviceRegistration: unexpected error: $e');
-      if (mounted) {
-        setState(() {
-          _currentStep = -1;
-          _errorMessage = 'Something went wrong during registration. Please try again.';
-        });
-      }
+      _fail(RegistrationFailure.unknown);
     } finally {
-      _isRegistering = false;
+      if (mounted) {
+        setState(() => _busy = false);
+      } else {
+        _busy = false;
+      }
     }
+  }
+
+  Future<void> _signInAgain() async {
+    // Same teardown order as Settings → Log out: drop the BLE link first so
+    // the next account doesn't inherit a live connection.
+    try {
+      await BleManager().disconnectAndReset();
+    } catch (e) {
+      debugPrint('DeviceRegistration: disconnect before sign-out failed: $e');
+    }
+    await AuthService().signOut();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginPage()),
+      (route) => false,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Device Registration'),
-        backgroundColor: Theme.of(context).primaryColor,
-        foregroundColor: Colors.white,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (_currentStep >= 0 && _currentStep < 3) ...[
-              CircularProgressIndicator(color: Colors.blue.shade600),
-              SizedBox(height: 24),
-              Text(
-                _status,
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
-                textAlign: TextAlign.center,
+    return PopScope(
+      canPop: !_busy,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Linking Smarty to your account'),
+          automaticallyImplyLeading: !_busy,
+          backgroundColor: Theme.of(context).primaryColor,
+          foregroundColor: Colors.white,
+        ),
+        body: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: switch (_phase) {
+                  _Phase.working => _buildWorking(),
+                  _Phase.done => _buildDone(),
+                  _Phase.failed => _buildFailed(),
+                },
               ),
-              SizedBox(height: 32),
-              _buildStepIndicator(),
-            ] else if (_currentStep == 3) ...[
-              Icon(Icons.check_circle, color: Colors.green, size: 64),
-              SizedBox(height: 16),
-              Text(
-                'Registration Complete!',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.green.shade700,
-                ),
-              ),
-              SizedBox(height: 8),
-              Text(
-                'Your Smarty is ready to use.',
-                style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
-              ),
-            ] else ...[
-              Icon(Icons.error_outline, color: Colors.red, size: 64),
-              SizedBox(height: 16),
-              Text(
-                'Registration Failed',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.red.shade700,
-                ),
-              ),
-              SizedBox(height: 8),
-              Text(
-                _errorMessage ?? 'An unknown error occurred.',
-                style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
-                textAlign: TextAlign.center,
-              ),
-              SizedBox(height: 24),
-              // Retry stays the primary action; "Not now" gives an explicit
-              // exit (pops `false`) so backing out lands in the connection
-              // page's honest "not finished" dialog instead of a dead end.
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: Text('Not now'),
-                  ),
-                  SizedBox(width: 12),
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _errorMessage = null;
-                      });
-                      _startRegistration();
-                    },
-                    icon: Icon(Icons.refresh),
-                    label: Text('Retry'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue.shade600,
-                      foregroundColor: Colors.white,
-                      padding:
-                          EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ],
+            ),
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildStepIndicator() {
-    final steps = ['Read ID', 'Register', 'Save'];
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(steps.length, (index) {
-        final isActive = index == _currentStep;
-        final isDone = index < _currentStep;
-        return Row(
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isDone
-                    ? Colors.green
-                    : isActive
-                        ? Colors.blue.shade600
-                        : Colors.grey.shade300,
-              ),
-              child: Center(
-                child: isDone
-                    ? Icon(Icons.check, color: Colors.white, size: 18)
-                    : Text(
-                        '${index + 1}',
-                        style: TextStyle(
-                          color: isActive ? Colors.white : Colors.grey.shade600,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-              ),
-            ),
-            SizedBox(width: 4),
-            Text(
-              steps[index],
-              style: TextStyle(
-                fontSize: 12,
-                color: isActive ? Colors.blue.shade600 : Colors.grey.shade500,
-                fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-            if (index < steps.length - 1)
-              Container(
-                width: 24,
-                height: 2,
-                margin: EdgeInsets.symmetric(horizontal: 8),
-                color: isDone ? Colors.green : Colors.grey.shade300,
-              ),
-          ],
-        );
-      }),
+  List<Widget> _buildWorking() => [
+        CircularProgressIndicator(color: Colors.blue.shade600),
+        const SizedBox(height: 24),
+        const Text(
+          'Linking Smarty to your account…',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+          textAlign: TextAlign.center,
+        ),
+      ];
+
+  List<Widget> _buildDone() => [
+        const Icon(Icons.check_circle, color: Colors.green, size: 64),
+        const SizedBox(height: 16),
+        Text(
+          'All set!',
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+            color: Colors.green.shade700,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Your Smarty is ready to use.',
+          style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
+          textAlign: TextAlign.center,
+        ),
+      ];
+
+  List<Widget> _buildFailed() {
+    final failure = _failure ?? RegistrationFailure.unknown;
+    final ButtonStyle primaryStyle = ElevatedButton.styleFrom(
+      backgroundColor: Colors.blue.shade600,
+      foregroundColor: Colors.white,
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
     );
+
+    final Widget actions;
+    if (failure == RegistrationFailure.signInRequired) {
+      actions = Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(LinkResult.later),
+            child: const Text('Not now'),
+          ),
+          const SizedBox(width: 12),
+          ElevatedButton(
+            onPressed: _signInAgain,
+            style: primaryStyle,
+            child: const Text('Sign in'),
+          ),
+        ],
+      );
+    } else if (failure == RegistrationFailure.alreadyOwned) {
+      // Already linked to someone else: retrying can't help, and setup must
+      // not carry on as if the parent had chosen "Not now".
+      actions = ElevatedButton(
+        onPressed: () => Navigator.of(context).pop(LinkResult.ownedElsewhere),
+        style: primaryStyle,
+        child: const Text('OK'),
+      );
+    } else {
+      // Retry stays the primary action; "Not now" gives an explicit exit
+      // (pops [LinkResult.later]): setup carries on, and Home keeps offering
+      // "Finish setup" until the toy is linked.
+      actions = Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(LinkResult.later),
+            child: const Text('Not now'),
+          ),
+          const SizedBox(width: 12),
+          ElevatedButton.icon(
+            onPressed: _startRegistration,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Try again'),
+            style: primaryStyle,
+          ),
+        ],
+      );
+    }
+
+    return [
+      const Icon(Icons.error_outline, color: Colors.red, size: 64),
+      const SizedBox(height: 16),
+      Text(
+        "Couldn't link Smarty",
+        style: TextStyle(
+          fontSize: 22,
+          fontWeight: FontWeight.w600,
+          color: Colors.red.shade700,
+        ),
+        textAlign: TextAlign.center,
+      ),
+      const SizedBox(height: 8),
+      Text(
+        _errorMessage ?? 'Something went wrong. Please try again.',
+        style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
+        textAlign: TextAlign.center,
+      ),
+      const SizedBox(height: 24),
+      actions,
+    ];
   }
 }

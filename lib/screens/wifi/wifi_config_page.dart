@@ -3,12 +3,10 @@ import 'package:flutter/material.dart';
 import '../../services/ble_manager.dart';
 import 'wifi_network_page.dart';
 
+/// "Smarty's Wi-Fi" (from Home / Settings): shows the toy's network and lets
+/// the parent change or forget it. Setup goes to [WifiNetworkPage] directly.
 class WifiConfigPage extends StatefulWidget {
-  // The device-setup flow pops the whole WiFi stack on success so the caller can
-  // celebrate; the Settings flow stays put and just refreshes its status card.
-  final bool popOnSuccess;
-
-  const WifiConfigPage({super.key, this.popOnSuccess = false});
+  const WifiConfigPage({super.key});
 
   @override
   WifiConfigPageState createState() => WifiConfigPageState();
@@ -18,145 +16,166 @@ class WifiConfigPageState extends State<WifiConfigPage> {
   // BLE manager
   final BleManager _bleManager = BleManager();
 
-  // Current WiFi information
+  // Current Wi-Fi information
   String _currentWifiName = "Unknown";
   bool _isLoading = true;
+  // In-flight lock for "Forget Wi-Fi Network" (blocks double taps).
+  bool _isForgettingWifi = false;
+  // Link to Smarty is up. While it's down the page stays, with a banner and
+  // its actions disabled, instead of closing itself.
+  bool _linkUp = BleManager().phase.value == ToyPhase.connected;
 
   // Stream subscriptions
   StreamSubscription? _wifiStatusSubscription;
-  StreamSubscription? _showSnackBarSubscription;
 
   @override
   void initState() {
     super.initState();
+    _bleManager.phase.addListener(_onPhaseChanged);
     _initializeWifiConfig();
 
-    // Listen for WiFi status updates
+    // Listen for Wi-Fi status updates
     _wifiStatusSubscription = _bleManager.wifiStatusStream.listen((wifiName) {
       if (!mounted) return;
       setState(() {
         _currentWifiName = wifiName;
       });
-      // If the device is disconnected, navigate back to connection page
-      if (wifiName == "NotConnected") {
-        print("📱 WifiConfigPage: Detected device disconnection");
-        _navigateToDeviceConnectionPage();
-      }
     });
 
-    // Listen for snackbar notifications
-    _showSnackBarSubscription = _bleManager.showSnackBarStream.listen((
-      message,
-    ) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
-    });
+    // BLE snackbars are shown app-wide by the single listener in main.dart.
   }
 
   @override
   void dispose() {
+    _bleManager.phase.removeListener(_onPhaseChanged);
     _wifiStatusSubscription?.cancel();
-    _showSnackBarSubscription?.cancel();
     super.dispose();
   }
-  
-  // Initialize WiFi configuration page
+
+  void _onPhaseChanged() {
+    if (!mounted) return;
+    final bool up = _bleManager.phase.value == ToyPhase.connected;
+    if (up == _linkUp) return;
+    setState(() => _linkUp = up);
+    // Back after a drop: refresh what we show.
+    if (up) _initializeWifiConfig();
+  }
+
+  // Load the toy's current Wi-Fi status.
   Future<void> _initializeWifiConfig() async {
+    if (!_bleManager.isConnected) {
+      // Not reachable right now: the lost-touch banner explains, and
+      // _onPhaseChanged reloads once the link is back.
+      setState(() {
+        _isLoading = false;
+        _currentWifiName = _bleManager.connectedWifi;
+      });
+      return;
+    }
+
     setState(() {
       _isLoading = true;
     });
 
-    // Ensure we have a connected device
-    if (_bleManager.connectedDevice == null) {
-      // No connected device, navigate back to connection page
-      _navigateToDeviceConnectionPage();
-      return;
-    }
-
-    // Request a status update to get the latest WiFi information
+    // Request a status update to get the latest Wi-Fi information
     try {
       await _bleManager.readStatusUpdate();
       
       // Short delay to allow status to update
       await Future.delayed(Duration(milliseconds: 1000));
     } catch (e) {
-      print("Error getting status update: $e");
+      debugPrint("Error getting status update: $e");
     }
 
+    if (!mounted) return;
     setState(() {
       _isLoading = false;
       _currentWifiName = _bleManager.connectedWifi;
     });
   }
 
-  // Navigate to WiFi network page
+  // Open the network list.
   Future<void> _navigateToWifiNetworkPage() async {
-    if (_bleManager.isConnected) {
-      // WifiNetworkPage pops `true` once the toy has actually joined a network.
-      final ok = await Navigator.push<bool>(
-        context,
-        MaterialPageRoute(builder: (context) => WifiNetworkPage()),
-      );
+    // Buttons are disabled while the link is down; this is just a guard.
+    if (!_bleManager.isConnected) return;
+    // WifiNetworkPage pops `true` once the toy has actually joined a network.
+    final ok = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (context) => WifiNetworkPage()),
+    );
+    if (!mounted) return;
+    if (ok == true) {
+      // Stay here and refresh the displayed Wi-Fi status.
+      await _bleManager.readStatusUpdate();
       if (!mounted) return;
-      if (ok == true) {
-        if (widget.popOnSuccess) {
-          Navigator.pop(context, true);
-          return;
-        }
-        // Settings flow: stay here and refresh the displayed WiFi status.
-        await _bleManager.readStatusUpdate();
-        if (!mounted) return;
-        setState(() {
-          _currentWifiName = _bleManager.connectedWifi;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Smarty is connected to Wi-Fi!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } else {
       setState(() {
-        _currentWifiName = 'Smarty service not found.';
+        _currentWifiName = _bleManager.connectedWifi;
       });
-      
-      // Navigate back to device connection page
-      _navigateToDeviceConnectionPage();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Smarty is connected to Wi-Fi!'),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 
-  // Navigate to device connection page (deferred to after current frame)
-  void _navigateToDeviceConnectionPage() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && Navigator.canPop(context)) {
-        Navigator.of(context).pop();
-      }
-    });
-  }
-
-  // Reset WiFi connection
+  // Reset Wi-Fi connection (after the parent confirms).
   Future<void> _resetWifiConnection() async {
-    bool success = await _bleManager.resetWifiConnection();
-    if (!mounted) return;
+    if (_isForgettingWifi) return;
 
-    if (success) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Successfully forgot WiFi network'))
-      );
-      // Wait for device to process reset, then refresh status
-      await Future.delayed(Duration(milliseconds: 500));
-      await _bleManager.readStatusUpdate();
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Forget Wi-Fi network?'),
+        content: Text(
+          "Smarty will disconnect from its Wi-Fi network and won't be able to "
+          "talk until you set up Wi-Fi again.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text('Forget'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted || _isForgettingWifi) return;
+
+    setState(() {
+      _isForgettingWifi = true;
+    });
+    try {
+      bool success = await _bleManager.resetWifiConnection();
+      if (!mounted) return;
+
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Smarty forgot its Wi-Fi network'))
+        );
+        // Wait for device to process reset, then refresh status
+        await Future.delayed(Duration(milliseconds: 500));
+        await _bleManager.readStatusUpdate();
+        if (mounted) {
+          setState(() {
+            _currentWifiName = _bleManager.connectedWifi;
+          });
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Couldn't forget the Wi-Fi network. Please try again."))
+        );
+      }
+    } finally {
       if (mounted) {
         setState(() {
-          _currentWifiName = _bleManager.connectedWifi;
+          _isForgettingWifi = false;
         });
       }
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to forget WiFi network'))
-      );
     }
   }
 
@@ -172,7 +191,7 @@ class WifiConfigPageState extends State<WifiConfigPage> {
         child: Scaffold(
           appBar: AppBar(
             title: Text(
-              'WiFi Configuration',
+              "Smarty's Wi-Fi",
               style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
@@ -203,21 +222,22 @@ class WifiConfigPageState extends State<WifiConfigPage> {
         children: const [
           CircularProgressIndicator(),
           SizedBox(height: 16),
-          Text('Loading WiFi configuration...'),
+          Text("Checking Smarty's Wi-Fi…"),
         ],
       ),
     );
   }
 
-  // Main content view based on WiFi connection state
+  // Main content view based on Wi-Fi connection state
   Widget _buildContentView() {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          // Content based on WiFi connection state
-          if (!_bleManager.isWifiConnected) 
+          if (!_linkUp) const LostTouchBanner(),
+          // Content based on Wi-Fi connection state
+          if (!_bleManager.isWifiConnected)
             _buildWifiNotConnectedView()
           else
             _buildWifiConnectedView(),
@@ -226,7 +246,7 @@ class WifiConfigPageState extends State<WifiConfigPage> {
     );
   }
 
-  // View when not connected to WiFi
+  // View when not connected to Wi-Fi
   Widget _buildWifiNotConnectedView() {
     return Expanded(
       child: Column(
@@ -246,7 +266,7 @@ class WifiConfigPageState extends State<WifiConfigPage> {
                       Icon(Icons.wifi_off, color: Colors.orange),
                       SizedBox(width: 8),
                       Text(
-                        'WiFi Not Connected',
+                        'Not on Wi-Fi',
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
@@ -256,7 +276,7 @@ class WifiConfigPageState extends State<WifiConfigPage> {
                   ),
                   SizedBox(height: 8),
                   Text(
-                    'Your Smarty device needs WiFi to connect to the internet.',
+                    'Smarty needs Wi-Fi to talk.',
                     style: TextStyle(
                       fontSize: 14,
                     ),
@@ -266,14 +286,14 @@ class WifiConfigPageState extends State<WifiConfigPage> {
             ),
           ),
           
-          // Configure WiFi button
+          // Configure Wi-Fi button
           ElevatedButton.icon(
             icon: Icon(Icons.wifi),
-            label: Text('Set Up WiFi Network'),
+            label: Text('Set Up Wi-Fi'),
             style: ElevatedButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
-            onPressed: _navigateToWifiNetworkPage,
+            onPressed: _linkUp ? _navigateToWifiNetworkPage : null,
           ),
           
           // Space at the bottom for future elements
@@ -283,13 +303,13 @@ class WifiConfigPageState extends State<WifiConfigPage> {
     );
   }
 
-  // View when connected to WiFi
+  // View when connected to Wi-Fi
   Widget _buildWifiConnectedView() {
     return Expanded(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // WiFi status card
+          // Wi-Fi status card
           Card(
             elevation: 4,
             margin: EdgeInsets.only(bottom: 16),
@@ -304,7 +324,7 @@ class WifiConfigPageState extends State<WifiConfigPage> {
                       SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Connected to WiFi',
+                          'Connected to Wi-Fi',
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
@@ -315,7 +335,7 @@ class WifiConfigPageState extends State<WifiConfigPage> {
                   ),
                   SizedBox(height: 8),
                   Text(
-                    _currentWifiName == "NoCredentials" || _currentWifiName.isEmpty 
+                    _currentWifiName.isEmpty
                     ? 'Connected'
                     : 'Network: $_currentWifiName',
                     style: TextStyle(
@@ -330,22 +350,29 @@ class WifiConfigPageState extends State<WifiConfigPage> {
           // Buttons
           ElevatedButton.icon(
             icon: Icon(Icons.refresh),
-            label: Text('Change WiFi Network'),
+            label: Text('Change Wi-Fi Network'),
             style: ElevatedButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
-            onPressed: _navigateToWifiNetworkPage,
+            onPressed: _linkUp ? _navigateToWifiNetworkPage : null,
           ),
           
           SizedBox(height: 12),
           
           OutlinedButton.icon(
-            icon: Icon(Icons.power_off),
-            label: Text('Forget WiFi Network'),
+            icon: _isForgettingWifi
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(Icons.power_off),
+            label: Text('Forget Wi-Fi Network'),
             style: OutlinedButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
-            onPressed: _resetWifiConnection,
+            onPressed:
+                _isForgettingWifi || !_linkUp ? null : _resetWifiConnection,
           ),
           
           // Space at the bottom for future elements

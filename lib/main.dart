@@ -8,7 +8,6 @@ import 'home_tab.dart';
 import 'settings_tab.dart';
 import 'providers/user_context_provider.dart';
 import 'utils/theme_provider.dart';
-import 'services/ble_service.dart';
 import 'services/ble_manager.dart';
 import 'screens/auth/login_page.dart';
 
@@ -22,11 +21,13 @@ void main() async {
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
         ChangeNotifierProvider(create: (_) => UserContextProvider()..init()),
       ],
-      child: MyApp(),
+      child: const MyApp(),
     ),
   );
 }
 
+// No app-wide BLE snackbars: connection changes show in place on the Home and
+// Settings cards, which render from BleManager.phase.
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -48,7 +49,7 @@ class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
   @override
-  _SplashScreenState createState() => _SplashScreenState();
+  State<SplashScreen> createState() => _SplashScreenState();
 }
 
 class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
@@ -123,7 +124,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.2),
+                        color: Colors.black.withValues(alpha: 0.2),
                         blurRadius: 16,
                         offset: Offset(0, 4),
                       ),
@@ -171,7 +172,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                         "Your Smart Toy Companion",
                         style: TextStyle(
                           fontSize: 16,
-                          color: Colors.white.withOpacity(0.9),
+                          color: Colors.white.withValues(alpha: 0.9),
                         ),
                       ),
                     ),
@@ -190,7 +191,7 @@ class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key});
 
   @override
-  _MyHomePageState createState() => _MyHomePageState();
+  State<MyHomePage> createState() => _MyHomePageState();
 }
 
 class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
@@ -206,10 +207,11 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
-    // Initialize BleService with context after the first frame is built
+    // Signed in: start watching for this account's toy. Non-blocking — Home
+    // renders from BleManager.phase while the quick probe runs.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        BleService.initialize(context);
+        unawaited(BleManager().watchSavedToy());
       }
     });
   }
@@ -222,7 +224,11 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.detached) {
+    if (state == AppLifecycleState.resumed) {
+      // Back from the background (or from Settings after turning Bluetooth
+      // on / granting permission / forgetting a stale pairing): re-check.
+      unawaited(BleManager().watchSavedToy());
+    } else if (state == AppLifecycleState.detached) {
       unawaited(BleManager().disconnectAndReset());
     }
   }
@@ -230,9 +236,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // Tabs must stay mounted, so switching back to Home doesn't re-trigger
-      // its BLE reconnect flow (which can show a ~15s reconnect spinner when
-      // the toy is off). IndexedStack keeps all tabs alive and just shows one.
+      // Tabs stay mounted (IndexedStack) so their state — e.g. Home's success
+      // celebration — survives switching tabs.
       body: IndexedStack(index: _currentIndex, children: _tabs),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(

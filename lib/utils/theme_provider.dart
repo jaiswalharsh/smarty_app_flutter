@@ -3,7 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ThemeProvider with ChangeNotifier {
   // Theme mode storage key
-  static const String THEME_KEY = 'theme_mode';
+  static const String _themeKey = 'theme_mode';
   
   // Initial theme mode
   ThemeMode _themeMode = ThemeMode.light;
@@ -36,7 +36,7 @@ class ThemeProvider with ChangeNotifier {
   // Load saved theme preference
   Future<void> _loadThemePreference() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedTheme = prefs.getString(THEME_KEY);
+    final savedTheme = prefs.getString(_themeKey);
     if (savedTheme != null) {
       _themeMode = savedTheme == 'dark' ? ThemeMode.dark : ThemeMode.light;
       notifyListeners();
@@ -46,24 +46,22 @@ class ThemeProvider with ChangeNotifier {
   // Save theme preference
   Future<void> _saveThemePreference() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(THEME_KEY, isDarkMode ? 'dark' : 'light');
+    await prefs.setString(_themeKey, isDarkMode ? 'dark' : 'light');
   }
 
   // Light theme data
   ThemeData get lightTheme {
     return ThemeData(
       brightness: Brightness.light,
-      primarySwatch: Colors.blue,
       primaryColor: Color(0xFF4169E1), // Royal Blue
       colorScheme: ColorScheme.fromSeed(
         seedColor: Color(0xFF4169E1),
         primary: Color(0xFF4169E1),
         secondary: Color(0xFFFF8C00), // Dark Orange
         tertiary: Color(0xFF32CD32), // Lime Green
-        background: Colors.white,
+        surface: Colors.white,
       ),
       scaffoldBackgroundColor: Colors.white,
-      fontFamily: 'Poppins',
       textTheme: TextTheme(
         displayLarge: TextStyle(
           fontSize: 28,
@@ -137,7 +135,6 @@ class ThemeProvider with ChangeNotifier {
   ThemeData get darkTheme {
     return ThemeData(
       brightness: Brightness.dark,
-      primarySwatch: Colors.indigo,
       primaryColor: Color(0xFF8A2BE2), // Blueviolet
       colorScheme: ColorScheme.dark(
         primary: Color(0xFF8A2BE2),        // Blueviolet
@@ -149,7 +146,6 @@ class ThemeProvider with ChangeNotifier {
       scaffoldBackgroundColor: Color(0xFF1A1A2E),
       cardColor: Color(0xFF2C2C44),
       dividerColor: Color(0xFF444466),
-      fontFamily: 'Poppins',
       textTheme: TextTheme(
         displayLarge: TextStyle(
           fontSize: 28,
@@ -163,11 +159,11 @@ class ThemeProvider with ChangeNotifier {
         ),
         bodyLarge: TextStyle(
           fontSize: 16,
-          color: Colors.white.withOpacity(0.87),
+          color: Colors.white.withValues(alpha: 0.87),
         ),
         bodyMedium: TextStyle(
           fontSize: 14,
-          color: Colors.white.withOpacity(0.87),
+          color: Colors.white.withValues(alpha: 0.87),
         ),
       ),
       cardTheme: CardThemeData(
@@ -220,7 +216,7 @@ class ThemeProvider with ChangeNotifier {
         }),
         trackColor: WidgetStateProperty.resolveWith<Color>((states) {
           if (states.contains(WidgetState.selected)) {
-            return Color(0xFF8A2BE2).withOpacity(0.5); // Blueviolet track
+            return Color(0xFF8A2BE2).withValues(alpha: 0.5); // Blueviolet track
           }
           return Colors.grey.shade400;
         }),

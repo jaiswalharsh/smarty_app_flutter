@@ -4,9 +4,7 @@ import '../../main.dart';
 import '../../services/auth_service.dart';
 
 class LoginPage extends StatefulWidget {
-  final VoidCallback? onLoginSuccess;
-
-  const LoginPage({super.key, this.onLoginSuccess});
+  const LoginPage({super.key});
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -35,6 +33,8 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _submit() async {
+    // Enter on the keyboard can re-submit while a request is in flight.
+    if (_isLoading) return;
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -56,21 +56,19 @@ class _LoginPageState extends State<LoginPage> {
         );
       }
       if (!mounted) return;
-      if (widget.onLoginSuccess != null) {
-        widget.onLoginSuccess!();
-      } else {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => MyHomePage()),
-          (route) => false,
-        );
-      }
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => MyHomePage()),
+        (route) => false,
+      );
       return;
     } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
       setState(() {
         _errorMessage = _friendlyError(e.code);
       });
     } catch (e) {
-      print("Auth error: $e");
+      debugPrint("Auth error: $e");
+      if (!mounted) return;
       setState(() {
         _errorMessage = 'Something went wrong. Please try again.';
       });
@@ -264,6 +262,7 @@ class _LoginPageState extends State<LoginPage> {
                             TextFormField(
                               controller: _emailController,
                               keyboardType: TextInputType.emailAddress,
+                              textInputAction: TextInputAction.next,
                               decoration: InputDecoration(
                                 labelText: 'Email',
                                 prefixIcon: Icon(Icons.email_outlined),
@@ -285,6 +284,14 @@ class _LoginPageState extends State<LoginPage> {
                             TextFormField(
                               controller: _passwordController,
                               obscureText: _obscurePassword,
+                              // Enter submits on sign-in; on sign-up it moves
+                              // on to the confirm field.
+                              textInputAction: _isSignUp
+                                  ? TextInputAction.next
+                                  : TextInputAction.done,
+                              onFieldSubmitted: (_) {
+                                if (!_isSignUp) _submit();
+                              },
                               decoration: InputDecoration(
                                 labelText: 'Password',
                                 prefixIcon: Icon(Icons.lock_outlined),
@@ -319,6 +326,8 @@ class _LoginPageState extends State<LoginPage> {
                               TextFormField(
                                 controller: _confirmPasswordController,
                                 obscureText: _obscurePassword,
+                                textInputAction: TextInputAction.done,
+                                onFieldSubmitted: (_) => _submit(),
                                 decoration: InputDecoration(
                                   labelText: 'Confirm password',
                                   prefixIcon: Icon(Icons.lock_outline),
@@ -406,14 +415,17 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                             SizedBox(height: 12),
                             TextButton(
-                              onPressed: () {
-                                setState(() {
-                                  _isSignUp = !_isSignUp;
-                                  _errorMessage = null;
-                                  _infoMessage = null;
-                                  _confirmPasswordController.clear();
-                                });
-                              },
+                              // Locked while a sign-in/up request is in flight.
+                              onPressed: _isLoading
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _isSignUp = !_isSignUp;
+                                        _errorMessage = null;
+                                        _infoMessage = null;
+                                        _confirmPasswordController.clear();
+                                      });
+                                    },
                               child: Text(
                                 _isSignUp
                                     ? 'Already have an account? Sign In'

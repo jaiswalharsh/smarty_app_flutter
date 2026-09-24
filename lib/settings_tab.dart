@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'screens/wifi/wifi_config_page.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/user_context_page.dart';
 import 'main.dart';
+import 'home_tab.dart' show toyStatusLine;
 import 'services/auth_service.dart';
 import 'services/ble_manager.dart';
 import 'utils/theme_provider.dart';
@@ -20,49 +22,26 @@ class _SettingsTabState extends State<SettingsTab> {
   // BLE manager
   final BleManager _bleManager = BleManager();
 
-  // Stream subscriptions
-  StreamSubscription? _deviceConnectionSubscription;
-  StreamSubscription? _showSnackBarSubscription;
+  // Repaints the "My Smarty" status line when the toy reports Wi-Fi status.
+  StreamSubscription? _wifiStatusSubscription;
 
   @override
   void initState() {
     super.initState();
-
-    // Set up listeners for device status changes
-    _setupStatusListeners();
+    _wifiStatusSubscription = _bleManager.wifiStatusStream.listen((_) {
+      if (mounted) setState(() {});
+    });
+    _bleManager.registeredListenable.addListener(_onRegisteredChanged);
   }
 
-  // Set up status listeners
-  void _setupStatusListeners() {
-    // Listen for connection state changes only — rebuild when connected/disconnected toggles
-    bool lastConnected = _bleManager.isConnected;
-    _deviceConnectionSubscription = _bleManager.wifiStatusStream.listen((
-      status,
-    ) {
-      if (!mounted) return;
-      final nowConnected = _bleManager.isConnected;
-      if (nowConnected != lastConnected) {
-        lastConnected = nowConnected;
-        setState(() {});
-      }
-    });
-
-    // Listen for snackbar notifications
-    _showSnackBarSubscription = _bleManager.showSnackBarStream.listen((
-      message,
-    ) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(message)));
-      }
-    });
+  void _onRegisteredChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
-    _deviceConnectionSubscription?.cancel();
-    _showSnackBarSubscription?.cancel();
+    _wifiStatusSubscription?.cancel();
+    _bleManager.registeredListenable.removeListener(_onRegisteredChanged);
     super.dispose();
   }
 
@@ -94,20 +73,14 @@ class _SettingsTabState extends State<SettingsTab> {
                                   : Colors.blue.shade800,
                         ),
                       ),
-                      SizedBox(height: 8),
-                      Text(
-                        "Let's set up your toy!",
-                        style: TextStyle(
-                          fontSize: 16,
-                          color:
-                              themeProvider.isDarkMode
-                                  ? Color(0xFF00FFCC)
-                                  : Colors.blue.shade600,
-                        ),
-                      ),
                     ],
                   ),
                 ),
+                ValueListenableBuilder<ToyPhase>(
+                  valueListenable: _bleManager.phase,
+                  builder: (context, phase, _) => _buildMySmartyCard(phase),
+                ),
+                SizedBox(height: 16),
                 _buildAccountCard(),
                 SizedBox(height: 16),
                 _buildSettingsCard(
@@ -129,33 +102,6 @@ class _SettingsTabState extends State<SettingsTab> {
                     _showThemeDialog(context, themeProvider);
                   },
                 ),
-                SizedBox(height: 16),
-                _buildSettingsCard(
-                  title: "User Context",
-                  description:
-                      "Tell Smarty what it should know about your child",
-                  icon: Icons.chat_bubble,
-                  iconColor:
-                      themeProvider.isDarkMode
-                          ? Color(0xFF00FFCC)
-                          : Colors.pink,
-                  bgColor:
-                      themeProvider.isDarkMode
-                          ? Color(0xFF2C2C44)
-                          : Colors.pink.shade50,
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => UserContextPage(),
-                      ),
-                    );
-                  },
-                ),
-                SizedBox(height: 16),
-                _bleManager.isConnected
-                    ? _buildWifiConfigCard()
-                    : _buildConnectDeviceCard(),
                 SizedBox(height: 16),
                 _buildSettingsCard(
                   title: "About Smarty",
@@ -258,29 +204,6 @@ class _SettingsTabState extends State<SettingsTab> {
     );
   }
 
-  // Card for WiFi configuration (when device is connected)
-  Widget _buildWifiConfigCard() {
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-
-    return _buildSettingsCard(
-      title: "Configure WiFi",
-      description: "Connect your Smarty toy to the internet",
-      icon: Icons.wifi,
-      iconColor: themeProvider.isDarkMode ? Color(0xFFFF6EC7) : Colors.blue,
-      bgColor:
-          themeProvider.isDarkMode ? Color(0xFF2C2C44) : Colors.blue.shade50,
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (context) => WifiConfigPage()),
-        ).then((_) {
-          // Refresh state when returning from navigation
-          if (mounted) setState(() {});
-        });
-      },
-    );
-  }
-
   // Card showing logged-in account
   Widget _buildAccountCard() {
     final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
@@ -334,8 +257,8 @@ class _SettingsTabState extends State<SettingsTab> {
               onPressed: () async {
                 Navigator.of(context).pop();
                 // Tear down BLE before signing out so the next account doesn't
-                // inherit a live connection (listener cancelled first → no
-                // auto-reconnect fires during teardown).
+                // inherit a live connection: cancels the pending background
+                // connect and the link-lost handler before disconnecting.
                 await BleManager().disconnectAndReset();
                 await AuthService().signOut();
                 if (mounted) {
@@ -363,27 +286,269 @@ class _SettingsTabState extends State<SettingsTab> {
     );
   }
 
-  // Card for connecting to device (when no device is connected)
-  Widget _buildConnectDeviceCard() {
+  // Permanent "My Smarty" card, rendered from BleManager.phase: one status
+  // line, then Wi-Fi / About your child / Forget rows.
+  Widget _buildMySmartyCard(ToyPhase phase) {
     final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+    final bool dark = themeProvider.isDarkMode;
+    final bool hasToy = phase != ToyPhase.noToy;
+    final bool connected = phase == ToyPhase.connected;
+    final String? rawName = _bleManager.savedToyName;
+    final String? code = hasToy ? BleManager.toyCode(rawName) : null;
+    final Color accent = dark ? Color(0xFFFF6EC7) : Colors.blue;
 
-    return _buildSettingsCard(
-      title: "Connect to Smarty Device",
-      description: "Find and connect to your Smarty toy",
-      icon: Icons.bluetooth_searching,
-      iconColor: themeProvider.isDarkMode ? Color(0xFFFF6EC7) : Colors.blue,
-      bgColor:
-          themeProvider.isDarkMode ? Color(0xFF2C2C44) : Colors.blue.shade50,
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (context) => SmartyConnectionPage()),
-        ).then((_) {
-          // Refresh state when returning from navigation
-          if (mounted) setState(() {});
-        });
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          color: dark ? Color(0xFF2C2C44) : Colors.blue.shade50,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: Row(
+                children: [
+                  Container(
+                    padding: EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: dark ? Color(0xFF3A3A5A) : Colors.white,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.2),
+                          blurRadius: 8,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Image.asset(
+                      'assets/images/icon.png',
+                      width: 30,
+                      height: 30,
+                      color: accent,
+                    ),
+                  ),
+                  SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                          textBaseline: TextBaseline.alphabetic,
+                          children: [
+                            Text(
+                              "My Smarty",
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: dark ? Colors.white : Colors.black87,
+                              ),
+                            ),
+                            if (code != null) ...[
+                              SizedBox(width: 8),
+                              Text(
+                                code,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: dark ? Colors.white54 : Colors.black45,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          toyStatusLine(_bleManager, short: true),
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: dark ? Colors.white70 : Colors.black54,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (!hasToy)
+              _buildMySmartyRow(
+                icon: Icons.add_circle_outline,
+                label: "Set up Smarty",
+                onTap: _openConnectionPage,
+              ),
+            if (hasToy)
+              _buildMySmartyRow(
+                icon: Icons.wifi,
+                label: "Wi-Fi",
+                detail: connected ? _wifiRowDetail() : "Available when Smarty is nearby",
+                onTap: connected
+                    ? () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (context) => WifiConfigPage()),
+                        ).then((_) {
+                          // Refresh state when returning from navigation
+                          if (mounted) setState(() {});
+                        });
+                      }
+                    : null,
+              ),
+            _buildMySmartyRow(
+              icon: Icons.chat_bubble,
+              label: "About your child",
+              detail: "What Smarty should know about your child",
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => UserContextPage()),
+                );
+              },
+            ),
+            if (hasToy)
+              _buildMySmartyRow(
+                icon: Icons.link_off,
+                label: "Forget this Smarty",
+                destructive: true,
+                onTap: _confirmForgetToy,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _wifiRowDetail() {
+    final wifi = _bleManager.connectedWifi.trim();
+    if (wifi.isEmpty || wifi == "Unknown" || wifi == "NotConnected") {
+      return "Checking…";
+    }
+    if (_bleManager.isWifiConnected) return wifi;
+    if (wifi == "Initializing" || wifi == "Reconnecting") return "Joining…";
+    return "Not connected";
+  }
+
+  Widget _buildMySmartyRow({
+    required IconData icon,
+    required String label,
+    String? detail,
+    VoidCallback? onTap,
+    bool destructive = false,
+  }) {
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+    final bool dark = themeProvider.isDarkMode;
+    final bool enabled = onTap != null;
+    final Color base = destructive
+        ? Colors.red.shade400
+        : (dark ? Colors.white : Colors.black87);
+    final Color fg = enabled ? base : base.withValues(alpha: 0.4);
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            SizedBox(width: 8),
+            Icon(icon, color: fg, size: 22),
+            SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: fg,
+                    ),
+                  ),
+                  if (detail != null) ...[
+                    SizedBox(height: 2),
+                    Text(
+                      detail,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: (dark ? Colors.white70 : Colors.black54)
+                            .withValues(alpha: enabled ? 1.0 : 0.6),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (enabled && !destructive)
+              Icon(
+                Icons.arrow_forward_ios,
+                color: dark ? Colors.white54 : Colors.black45,
+                size: 16,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openConnectionPage() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => SmartyConnectionPage()),
+    ).then((_) {
+      if (!mounted) return;
+      setState(() {});
+      unawaited(_bleManager.watchSavedToy());
+    });
+  }
+
+  Future<void> _confirmForgetToy() async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text("Forget this Smarty?"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "Smarty will be disconnected from this phone. "
+                "You can set it up again any time.",
+              ),
+              if (Platform.isIOS) ...[
+                SizedBox(height: 12),
+                Text(
+                  "To set it up again later, also forget it in "
+                  "Settings → Bluetooth.",
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text("Cancel"),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: Text("Forget"),
+            ),
+          ],
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        );
       },
     );
+    if (confirmed != true) return;
+    await _bleManager.forgetToy();
+    if (mounted) setState(() {});
   }
 
   // Helper to build nice settings cards
@@ -422,7 +587,7 @@ class _SettingsTabState extends State<SettingsTab> {
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
-                      color: iconColor.withOpacity(0.2),
+                      color: iconColor.withValues(alpha: 0.2),
                       blurRadius: 8,
                       offset: Offset(0, 2),
                     ),
@@ -489,6 +654,7 @@ class _SettingsTabState extends State<SettingsTab> {
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
+          scrollable: true,
           title: Row(
             children: [
               Image.asset(
@@ -513,6 +679,7 @@ class _SettingsTabState extends State<SettingsTab> {
                 style: TextStyle(fontSize: 16),
               ),
               SizedBox(height: 16),
+              // TODO: read from package_info_plus instead of hardcoding.
               Text("Version: 1.0.0"),
               // Firmware version intentionally not shown: the device doesn't yet
               // report it over BLE, and a hardcoded number would drift and
@@ -546,6 +713,7 @@ class _SettingsTabState extends State<SettingsTab> {
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
+          scrollable: true,
           title: Row(
             children: [
               Icon(
@@ -568,7 +736,7 @@ class _SettingsTabState extends State<SettingsTab> {
               SizedBox(height: 16),
               _buildHelpItem(
                 "1. Make sure Smarty is charged",
-                "The battery should be above 20%",
+                "If it isn't responding, plug it in to charge for a while",
               ),
               _buildHelpItem(
                 "2. Stay within range",

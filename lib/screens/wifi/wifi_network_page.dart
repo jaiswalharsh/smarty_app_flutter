@@ -7,6 +7,42 @@ import '../../utils/wifi_utils.dart';
 // message text for words like "Failed" (which broke as soon as copy changed).
 enum _BannerSeverity { info, progress, success, error }
 
+/// Shown on the Wi-Fi pages while the Bluetooth link to Smarty is down.
+/// BleManager reconnects by itself, so the page stays put and its actions
+/// come back once [ToyPhase.connected] returns.
+class LostTouchBanner extends StatelessWidget {
+  const LostTouchBanner({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.orange),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.bluetooth_searching, color: Colors.orange.shade800),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              "Lost touch with Smarty — keep it close to your phone. "
+              "We'll reconnect automatically.",
+              style: TextStyle(
+                color: Colors.orange.shade900,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class WifiNetworkPage extends StatefulWidget {
   const WifiNetworkPage({super.key});
 
@@ -25,13 +61,20 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   // Set ONLY on timeout, so a late terminal status for that SSID can still
   // correct the banner after we've stopped awaiting.
   String? _lastAttemptSsid;
-  String _bannerMessage = 'Scanning for WiFi networks...';
+  String _bannerMessage = 'Smarty is looking for Wi-Fi networks…';
   _BannerSeverity _severity = _BannerSeverity.progress;
   StreamSubscription<String>? _statusSub;
+  // Link to Smarty is up. While it's down the page stays, with a banner and
+  // its actions disabled, instead of closing itself.
+  bool _linkUp = BleManager().phase.value == ToyPhase.connected;
+  // The link dropped while a Wi-Fi scan was running: that scan's list is
+  // empty or partial, so look again once the link is back.
+  bool _droppedDuringScan = false;
 
   @override
   void initState() {
     super.initState();
+    _bleManager.phase.addListener(_onPhaseChanged);
     // Late-result recovery: after a timeout we stop awaiting, but the toy may
     // still emit the real verdict for the last attempt — surface it here so the
     // banner corrects itself instead of leaving a stale "taking longer" message.
@@ -41,8 +84,34 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
 
   @override
   void dispose() {
+    _bleManager.phase.removeListener(_onPhaseChanged);
     _statusSub?.cancel();
     super.dispose();
+  }
+
+  void _onPhaseChanged() {
+    if (!mounted) return;
+    final bool up = _bleManager.phase.value == ToyPhase.connected;
+    if (up == _linkUp) return;
+    setState(() => _linkUp = up);
+    if (!up && _isScanningWifi) _droppedDuringScan = true;
+    // Back from a drop with nothing (or only a partial list) to show: look
+    // again by ourselves. A scan still running from before the drop rescans
+    // when it ends (see _rescanIfDropped).
+    if (up &&
+        !_isScanningWifi &&
+        !_isProvisioning &&
+        (_wifiNetworks.isEmpty || _droppedDuringScan)) {
+      _scanWifiNetworks();
+    }
+  }
+
+  // Called when a scan ends: if the link dropped during it and is back now,
+  // scan once more (the quick drop may be over before the scan even ends).
+  void _rescanIfDropped() {
+    if (!mounted || !_droppedDuringScan) return;
+    if (!_linkUp || _isProvisioning) return; // _onPhaseChanged picks it up
+    _scanWifiNetworks();
   }
 
   void _handleLateStatus(String status) {
@@ -75,16 +144,32 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         _severity = _BannerSeverity.success;
       });
       Future.delayed(const Duration(milliseconds: 1200), () {
-        if (mounted) Navigator.pop(context, true);
+        _popThisPage(true);
       });
     }
   }
 
+  // Delayed success pop: close THIS page even if a dialog was opened on top in
+  // the meantime (a bare Navigator.pop would close that dialog instead).
+  void _popThisPage(bool result) {
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive) return;
+    final navigator = Navigator.of(context);
+    if (!route.isCurrent) {
+      navigator.popUntil((r) => r == route);
+    }
+    navigator.pop(result);
+  }
+
   Future<void> _scanWifiNetworks() async {
+    // A scan started while the link is down can't succeed — let the
+    // reconnect trigger another one.
+    _droppedDuringScan = !_linkUp;
     setState(() {
       _isScanningWifi = true;
       _wifiNetworks = [];
-      _bannerMessage = 'Scanning for WiFi networks...';
+      _bannerMessage = 'Smarty is looking for Wi-Fi networks…';
       _severity = _BannerSeverity.progress;
     });
 
@@ -97,16 +182,20 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         _isScanningWifi = false;
         _bannerMessage = _wifiNetworks.isEmpty
             ? 'No Wi-Fi networks found.'
-            : 'Found ${_wifiNetworks.length} Wi-Fi networks';
+            : 'Choose your home Wi-Fi';
         _severity = _BannerSeverity.info;
       });
+      _rescanIfDropped();
     } catch (e) {
+      debugPrint("WifiNetworkPage: Wi-Fi scan failed: $e");
       if (!mounted) return;
       setState(() {
         _isScanningWifi = false;
-        _bannerMessage = 'WiFi scan failed: $e';
+        _bannerMessage =
+            "Couldn't scan for Wi-Fi networks. Make sure Smarty is nearby and try again.";
         _severity = _BannerSeverity.error;
       });
+      _rescanIfDropped();
     }
   }
 
@@ -163,7 +252,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         // The `true` result is a contract: a follow-up screen celebrates it.
         // Short delay so the parent sees the success banner before we pop.
         Future.delayed(const Duration(milliseconds: 1200), () {
-          if (mounted) Navigator.pop(context, true);
+          _popThisPage(true);
         });
         break;
       case WifiProvisionResult.wrongPassword:
@@ -188,9 +277,11 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
         setState(() {
           _isProvisioning = false;
           _provisioningSsid = null;
+          // The lost-touch banner explains the drop; once Smarty is back the
+          // parent just picks the network again.
           _bannerMessage =
-              "Lost connection to Smarty. Make sure it's turned on and nearby, then reconnect and try again.";
-          _severity = _BannerSeverity.error;
+              "Smarty didn't finish joining $ssid. Pick it again once Smarty is back.";
+          _severity = _BannerSeverity.info;
         });
         break;
       case WifiProvisionResult.timeout:
@@ -210,7 +301,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
           _isProvisioning = false;
           _provisioningSsid = null;
           _bannerMessage =
-              "Couldn't send Wi-Fi details to Smarty. Reconnect and try again.";
+              "Couldn't send the Wi-Fi details to Smarty. Please try again.";
           _severity = _BannerSeverity.error;
         });
         break;
@@ -272,7 +363,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   }
 
   Widget _buildTile(WifiNetwork network) {
-    final bool disabled = _isProvisioning || _isScanningWifi;
+    final bool disabled = _isProvisioning || _isScanningWifi || !_linkUp;
     final bool isThisProvisioning = _provisioningSsid == network.ssid;
 
     Widget? trailing;
@@ -297,7 +388,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
   }
 
   Widget _buildHiddenNetworkButton() {
-    final bool disabled = _isProvisioning || _isScanningWifi;
+    final bool disabled = _isProvisioning || _isScanningWifi || !_linkUp;
     return TextButton.icon(
       onPressed: disabled ? null : _showHiddenNetworkDialog,
       icon: const Icon(Icons.wifi_find),
@@ -323,7 +414,8 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
-              onPressed: _isProvisioning ? null : _scanWifiNetworks,
+              onPressed:
+                  _isProvisioning || !_linkUp ? null : _scanWifiNetworks,
               icon: const Icon(Icons.refresh),
               label: const Text('Rescan'),
             ),
@@ -340,7 +432,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Available WiFi Networks:',
+          'Available Wi-Fi networks',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
         SizedBox(height: 4),
@@ -362,12 +454,12 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
 
   @override
   Widget build(BuildContext context) {
-    final bool busy = _isScanningWifi || _isProvisioning;
+    final bool busy = _isScanningWifi || _isProvisioning || !_linkUp;
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('WiFi Networks'),
+          title: const Text('Wi-Fi Networks'),
           actions: [
             IconButton(
               icon: const Icon(Icons.wifi_find),
@@ -377,7 +469,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
             IconButton(
               icon: Icon(Icons.refresh),
               onPressed: busy ? null : _scanWifiNetworks,
-              tooltip: 'Refresh WiFi Networks',
+              tooltip: 'Refresh Wi-Fi networks',
             ),
           ],
         ),
@@ -386,6 +478,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (!_linkUp) const LostTouchBanner(),
               _buildBanner(),
               if (_isScanningWifi)
                 Expanded(
@@ -395,7 +488,7 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
                       children: const [
                         CircularProgressIndicator(),
                         SizedBox(height: 16),
-                        Text('Scanning for WiFi networks...'),
+                        Text('Smarty is looking for Wi-Fi networks…'),
                       ],
                     ),
                   ),
@@ -464,7 +557,7 @@ class _HiddenNetworkDialogState extends State<_HiddenNetworkDialog> {
             TextField(
               controller: ssidController,
               decoration: InputDecoration(
-                labelText: 'Network name (SSID)',
+                labelText: 'Network name',
                 border: const OutlineInputBorder(),
                 errorText: ssidError,
               ),

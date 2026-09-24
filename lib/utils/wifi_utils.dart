@@ -29,7 +29,7 @@ class WifiUtils {
 
     try {
       if (data.isEmpty) {
-        print("📶 Empty WiFi scan data received");
+        debugPrint("📶 Empty WiFi scan data received");
         return [];
       }
 
@@ -87,10 +87,10 @@ class WifiUtils {
       final List<WifiNetwork> networks = byssid.values.toList()
         ..sort((a, b) => b.rssi.compareTo(a.rssi));
 
-      print("📶 Processed ${networks.length} networks");
+      debugPrint("📶 Processed ${networks.length} networks");
       return networks;
     } catch (e) {
-      print("❌ Error processing WiFi scan data: $e");
+      debugPrint("❌ Error processing WiFi scan data: $e");
       return [];
     }
   }
