@@ -394,13 +394,14 @@ class BleManager {
   // same phone must not inherit the first account's saved toy.
   static const String _legacyDeviceIdKey = 'smarty_saved_device_id';
   static const String _legacyDeviceNameKey = 'smarty_saved_device_name';
-  String _deviceIdKeyFor(String uid) => 'smarty_saved_device_id_$uid';
-  String _deviceNameKeyFor(String uid) => 'smarty_saved_device_name_$uid';
+  static String _deviceIdKeyFor(String uid) => 'smarty_saved_device_id_$uid';
+  static String _deviceNameKeyFor(String uid) =>
+      'smarty_saved_device_name_$uid';
   // Last Wi-Fi name is per TOY (keyed by its BLE id), so a newly set-up toy
   // never inherits the previous toy's network name. The per-account key it
   // used to live under is migrated once, then removed.
   String _lastWifiKeyFor(String toyId) => 'smarty_last_wifi_toy_$toyId';
-  String _legacyLastWifiKeyFor(String uid) => 'smarty_last_wifi_$uid';
+  static String _legacyLastWifiKeyFor(String uid) => 'smarty_last_wifi_$uid';
   // Local "linked" record for firmware that can't report `registered`, keyed
   // by the toy's own id (ab06). Same key the setup page has always written.
   static String _registeredRecordKey(String toyDeviceId) =>
@@ -409,6 +410,16 @@ class BleManager {
   // profile size limit is known while it is connected (a connected toy
   // doesn't advertise). See [userContextMaxBytes].
   static String _advVersionKeyFor(String toyId) => 'toy_adv_ver_$toyId';
+
+  /// Every SharedPreferences key this class keeps for the account [uid] (used
+  /// when the account is deleted). Per-toy keys (last Wi-Fi name, advert
+  /// version) are not listed: [clearSavedDevice] removes those for the saved
+  /// toy.
+  static List<String> accountPrefsKeys(String uid) => [
+        _deviceIdKeyFor(uid),
+        _deviceNameKeyFor(uid),
+        _legacyLastWifiKeyFor(uid),
+      ];
 
   // Current Firebase uid, or null when signed out. Firebase.initializeApp is
   // awaited in main() before runApp, so this is safe to read on demand.

@@ -5,7 +5,9 @@ import 'package:provider/provider.dart';
 import 'screens/wifi/wifi_config_page.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/user_context_page.dart';
-import 'main.dart';
+import 'app_info.dart';
+import 'screens/account/account_helpers.dart';
+import 'screens/account/your_account_page.dart';
 import 'home_tab.dart' show toyStatusLine;
 import 'services/auth_service.dart';
 import 'services/ble_manager.dart';
@@ -206,84 +208,36 @@ class _SettingsTabState extends State<SettingsTab> {
     );
   }
 
-  // Card showing logged-in account
+  // "Your account" card: the parent's initials, their name (or "Your
+  // account"), and their email. Opens the full account page.
   Widget _buildAccountCard() {
     final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-    final email = AuthService().currentUser?.email ?? "Not signed in";
+    final user = AuthService().currentUser;
+    final String? name = user?.displayName?.trim();
+    final bool hasName = name != null && name.isNotEmpty;
+    final String? email = user?.email;
+    final Color iconColor =
+        themeProvider.isDarkMode ? Color(0xFF00FFCC) : Colors.indigo;
 
     return _buildSettingsCard(
-      title: email,
-      description: "Manage your account",
+      title: hasName ? name : "Your account",
+      description: (email == null || email.isEmpty) ? "Not signed in" : email,
       icon: Icons.person_outline,
-      iconColor: themeProvider.isDarkMode ? Color(0xFF00FFCC) : Colors.indigo,
+      iconColor: iconColor,
       bgColor:
           themeProvider.isDarkMode ? Color(0xFF2C2C44) : Colors.indigo.shade50,
+      leading: AccountInitials(
+        initials: initialsFor(displayName: name, email: email),
+        color: iconColor,
+      ),
       onTap: () {
-        _showAccountDialog();
-      },
-    );
-  }
-
-  // Account dialog with sign-out
-  void _showAccountDialog() {
-    final email = AuthService().currentUser?.email ?? "Not signed in";
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Row(
-            children: [
-              Icon(Icons.person, color: Colors.indigo, size: 24),
-              SizedBox(width: 8),
-              Text("Account"),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(email, style: TextStyle(fontSize: 16)),
-              SizedBox(height: 8),
-              Text(
-                "Signed in",
-                style: TextStyle(fontSize: 14, color: Colors.grey),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text("Close"),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                Navigator.of(context).pop();
-                // Tear down BLE before signing out so the next account doesn't
-                // inherit a live connection: cancels the pending background
-                // connect and the link-lost handler before disconnecting.
-                await BleManager().disconnectAndReset();
-                await AuthService().signOut();
-                if (mounted) {
-                  Navigator.of(this.context).pushAndRemoveUntil(
-                    MaterialPageRoute(builder: (_) => SplashScreen()),
-                    (route) => false,
-                  );
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-              child: Text("Sign Out"),
-            ),
-          ],
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        );
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => YourAccountPage()),
+        ).then((_) {
+          // The name may have changed.
+          if (mounted) setState(() {});
+        });
       },
     );
   }
@@ -562,6 +516,7 @@ class _SettingsTabState extends State<SettingsTab> {
     required Color bgColor,
     required VoidCallback onTap,
     bool useCustomRobotIcon = false,
+    Widget? leading,
   }) {
     final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
 
@@ -596,14 +551,15 @@ class _SettingsTabState extends State<SettingsTab> {
                   ],
                 ),
                 child:
-                    useCustomRobotIcon
+                    leading ??
+                    (useCustomRobotIcon
                         ? Image.asset(
                           'assets/images/icon.png',
                           width: 30,
                           height: 30,
                           color: iconColor,
                         )
-                        : Icon(icon, color: iconColor, size: 30),
+                        : Icon(icon, color: iconColor, size: 30)),
               ),
               SizedBox(width: 16),
               Expanded(
@@ -681,8 +637,7 @@ class _SettingsTabState extends State<SettingsTab> {
                 style: TextStyle(fontSize: 16),
               ),
               SizedBox(height: 16),
-              // TODO: read from package_info_plus instead of hardcoding.
-              Text("Version: 1.0.0"),
+              Text("Version: $appVersion"),
               // Firmware version intentionally not shown: the device doesn't yet
               // report it over BLE, and a hardcoded number would drift and
               // mislead (APP-11). Restore this once it's read from the device.

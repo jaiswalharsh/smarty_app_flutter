@@ -34,10 +34,15 @@ class UserContextProvider with ChangeNotifier {
   // migration into the uid-scoped key — one parent's child profile must not
   // leak to another account on a shared phone.
   static const String _legacyPrefsKey = 'user_context';
-  String _prefsKeyFor(String uid) => 'user_context_$uid';
+  static String _prefsKeyFor(String uid) => 'user_context_$uid';
   // Set when an edit was saved locally but never reached the toy (it was
   // offline). While set, the local value is authoritative over the toy's.
-  String _pendingKeyFor(String uid) => 'user_context_pending_sync_$uid';
+  static String _pendingKeyFor(String uid) => 'user_context_pending_sync_$uid';
+
+  /// Every SharedPreferences key this provider keeps for the account [uid]
+  /// (used when the account is deleted).
+  static List<String> accountPrefsKeys(String uid) =>
+      [_prefsKeyFor(uid), _pendingKeyFor(uid)];
 
   String _context = '';
   ContextSyncState _state = ContextSyncState.idle;
