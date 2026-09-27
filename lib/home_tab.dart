@@ -1,27 +1,33 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:math';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'dev_config.dart';
+import 'screens/user_context_page.dart';
 import 'services/ble_manager.dart';
 import 'services/ble_service.dart';
 import 'screens/convos/live_chat_banner.dart';
 import 'screens/devices/setup_steps.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/wifi/wifi_config_page.dart';
+import 'widgets/forget_toy.dart';
 import 'widgets/numbered_steps.dart';
+import 'widgets/toy_shortcuts.dart';
 
-/// One-line, parent-facing status for the toy, shared by Home (full) and
-/// Settings ([short]). Plain words only — no "device", "scan", "BLE".
+/// One-line, parent-facing status for the toy on Home's toy card ([short]:
+/// the compact form). Plain words only — no "device", "scan", "BLE".
 /// [statusStalled] = a connected toy never answered the status read.
+/// [phase] defaults to [BleManager.phase].
 String toyStatusLine(
   BleManager ble, {
   bool short = false,
   bool statusStalled = false,
+  ToyPhase? phase,
 }) {
   final bool seenRecently = ble.savedToySeenRecently;
   return toyStatusLineFor(
-    phase: ble.phase.value,
+    phase: phase ?? ble.phase.value,
     wifi: ble.connectedWifi,
     registered: ble.registered,
     lastKnownWifiName: ble.lastKnownWifiName,
@@ -151,7 +157,11 @@ bool homeToyCardBusy({
 }
 
 class HomeTab extends StatefulWidget {
-  const HomeTab({super.key});
+  const HomeTab({super.key, @visibleForTesting this.toyPhase});
+
+  /// Where the app stands with Smarty; [BleManager.phase] unless a test
+  /// supplies its own.
+  final ValueListenable<ToyPhase>? toyPhase;
 
   @override
   State<HomeTab> createState() => _HomeTabState();
@@ -159,6 +169,8 @@ class HomeTab extends StatefulWidget {
 
 class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   final BleManager _bleManager = BleManager();
+  late final ValueListenable<ToyPhase> _phase =
+      widget.toyPhase ?? _bleManager.phase;
   late AnimationController _animationController;
   bool _showSuccessState = false;
   StreamSubscription? _wifiStatusSubscription;
@@ -199,7 +211,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       });
     });
 
-    _bleManager.phase.addListener(_onPhaseChanged);
+    _phase.addListener(_onPhaseChanged);
     _bleManager.registeredListenable.addListener(_onRegisteredChanged);
     _onPhaseChanged();
 
@@ -213,7 +225,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   @override
   void dispose() {
-    _bleManager.phase.removeListener(_onPhaseChanged);
+    _phase.removeListener(_onPhaseChanged);
     _bleManager.registeredListenable.removeListener(_onRegisteredChanged);
     _wifiStatusSubscription?.cancel();
     _wifiStallTimer?.cancel();
@@ -224,7 +236,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   void _onPhaseChanged() {
-    final ToyPhase phase = _bleManager.phase.value;
+    final ToyPhase phase = _phase.value;
     if (phase == ToyPhase.connected) {
       _armWifiStallTimer();
     } else {
@@ -249,7 +261,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _busyTimer = Timer(_busyHintAfter, () {
       _busyTimer = null;
       if (!mounted) return;
-      final ToyPhase now = _bleManager.phase.value;
+      final ToyPhase now = _phase.value;
       if (now != ToyPhase.probing && now != ToyPhase.connecting) return;
       setState(() => _busyLong = true);
     });
@@ -260,7 +272,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _sightingTimer?.cancel();
     _sightingTimer = null;
     final seenAt = _bleManager.lastSeenAt;
-    if (_bleManager.phase.value != ToyPhase.notNearby || seenAt == null) {
+    if (_phase.value != ToyPhase.notNearby || seenAt == null) {
       return;
     }
     final left =
@@ -380,6 +392,20 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     await _refreshStatus();
   }
 
+  void _openAboutChild() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const UserContextPage()),
+    );
+  }
+
+  // "⋯" → "Forget this Smarty": asks first; Home then shows "Set up Smarty"
+  // (the phase moves to noToy).
+  Future<void> _forgetToy() async {
+    await confirmAndForgetToy(context);
+    if (mounted) setState(() {});
+  }
+
   // Bluetooth-off fix: Android can show the system "turn on" dialog; iOS has
   // no API for that, so we can only open Settings.
   void _turnOnBluetooth() {
@@ -395,7 +421,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         // scroll area, so a pull works right up to the screen's edges.
         body: SafeArea(
           child: ValueListenableBuilder<ToyPhase>(
-            valueListenable: _bleManager.phase,
+            valueListenable: _phase,
             builder: (context, phase, _) => _buildForPhase(phase),
           ),
         ),
@@ -440,7 +466,8 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   // The toy's own card: name ("Smarty"), the 4-char code as small secondary
-  // text, and a one-line status. [busy] shows a small inline spinner.
+  // text, and a one-line status. [busy] shows a small inline spinner. The
+  // "⋯" button holds the rarely used actions (Forget this Smarty).
   Widget _buildToyCard({required String subtitle, bool busy = false}) {
     final String? rawName = _bleManager.savedToyName;
     final String title = BleManager.toyDisplayName(rawName);
@@ -519,8 +546,23 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
               ],
             ),
           ),
+          ToyMoreButton(
+            color: Colors.blue.shade700,
+            onForget: () => unawaited(_forgetToy()),
+          ),
         ],
       ),
+    );
+  }
+
+  // Wi-Fi / About your child, under the toy card whenever a toy is saved.
+  Widget _buildShortcuts() {
+    if (!homeShowsToyShortcuts(_phase.value)) return const SizedBox.shrink();
+    return ToyShortcuts(
+      connected: _phase.value == ToyPhase.connected,
+      wifi: _bleManager.connectedWifi,
+      onWifi: () => unawaited(_openWifiSetup()),
+      onAboutChild: _openAboutChild,
     );
   }
 
@@ -600,8 +642,12 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (showToyCard) _buildToyCard(subtitle: toyCardSubtitle ?? heading),
-          SizedBox(height: 40),
+          if (showToyCard) ...[
+            _buildToyCard(subtitle: toyCardSubtitle ?? heading),
+            SizedBox(height: 12),
+            _buildShortcuts(),
+          ],
+          SizedBox(height: 32),
           Icon(icon, size: 56, color: iconColor),
           SizedBox(height: 16),
           Text(
@@ -676,12 +722,14 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildToyCard(
-            subtitle: toyStatusLine(_bleManager),
+            subtitle: toyStatusLine(_bleManager, phase: phase),
             busy: homeToyCardBusy(
               phase: phase,
               pullRefreshing: _pullRefreshing,
             ),
           ),
+          SizedBox(height: 12),
+          _buildShortcuts(),
           if (_busyLong) ...[
             SizedBox(height: 16),
             Text(
@@ -824,6 +872,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
             subtitle: toyStatusLine(
               _bleManager,
               statusStalled: _wifiStatusStalled,
+              phase: ToyPhase.connected,
             ),
             // No spinner once the advert has already told us "not on
             // Wi-Fi", nor during a pull (its own spinner shows).
@@ -850,6 +899,8 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
           ],
           SizedBox(height: 20),
           _buildWifiStatusCard(),
+          SizedBox(height: 12),
+          _buildShortcuts(),
           // NOTE: battery status card intentionally omitted — the device has no
           // battery sensing yet (firmware returns a fixed placeholder), so showing
           // a precise "%" would mislead parents (APP-7 / FW-21). Restore this card

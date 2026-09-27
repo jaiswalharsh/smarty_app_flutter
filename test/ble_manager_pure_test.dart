@@ -300,11 +300,13 @@ void main() {
   });
 
   group('BleManager.deriveRegistered', () {
-    bool? derive(bool? status, bool? local, {bool linked = false}) =>
+    bool? derive(bool? status, bool? local,
+            {bool linked = false, bool? accountHasToy}) =>
         BleManager.deriveRegistered(
           statusRegistered: status,
           localRegistered: local,
           linkedThisConnection: linked,
+          accountHasToy: accountHasToy,
         );
 
     test('status field wins over the local record', () {
@@ -331,6 +333,81 @@ void main() {
 
     test('a new connection (flag cleared) trusts the status again', () {
       expect(derive(false, true, linked: false), isFalse);
+    });
+
+    test('the toy holds a key but is not on this account → not linked', () {
+      // e.g. a key from a dev emulator, another account or a deleted one:
+      // Home must offer "Finish setup" and setup must run its link step.
+      expect(derive(true, null, accountHasToy: false), isFalse);
+      expect(derive(null, true, accountHasToy: false), isFalse);
+      expect(derive(true, true, accountHasToy: false), isFalse);
+      expect(derive(null, null, accountHasToy: false), isFalse);
+    });
+
+    test("can't tell (offline / signed out) keeps the toy's answer", () {
+      expect(derive(true, null, accountHasToy: null), isTrue);
+      expect(derive(false, null, accountHasToy: null), isFalse);
+      expect(derive(null, true, accountHasToy: null), isTrue);
+      expect(derive(null, null, accountHasToy: null), isNull);
+    });
+
+    test('on this account: the toy still decides (a lost key needs linking)',
+        () {
+      expect(derive(true, null, accountHasToy: true), isTrue);
+      expect(derive(false, null, accountHasToy: true), isFalse);
+      expect(derive(null, true, accountHasToy: true), isTrue);
+    });
+
+    test('linking on this connection wins over a "not on this account"', () {
+      // The check may have answered before the link finished.
+      expect(derive(true, null, linked: true, accountHasToy: false), isTrue);
+      expect(derive(false, false, linked: true, accountHasToy: false), isTrue);
+    });
+  });
+
+  group('BleManager.shouldStartAccountCheck', () {
+    bool should({
+      bool linkingEnabled = true,
+      bool? registered = true,
+      bool linked = false,
+      bool checked = false,
+      bool unknown = false,
+      bool retry = false,
+    }) =>
+        BleManager.shouldStartAccountCheck(
+          linkingEnabled: linkingEnabled,
+          registered: registered,
+          linkedThisConnection: linked,
+          checkedThisConnection: checked,
+          lastAnswerUnknown: unknown,
+          retryUnknown: retry,
+        );
+
+    test('a toy that says it is linked is checked once per connection', () {
+      expect(should(), isTrue);
+      expect(should(checked: true), isFalse);
+      expect(should(checked: true, retry: true), isFalse); // it answered
+    });
+
+    test("an earlier \"can't tell\" is retried only when asked", () {
+      expect(should(checked: true, unknown: true), isFalse);
+      expect(should(checked: true, unknown: true, retry: true), isTrue);
+    });
+
+    test('nothing to check for a toy that is not (known to be) linked', () {
+      expect(should(registered: false), isFalse);
+      expect(should(registered: null), isFalse);
+    });
+
+    test('not after linking it on this connection', () {
+      expect(should(linked: true), isFalse);
+    });
+
+    test('never without the account link (dev builds)', () {
+      expect(should(linkingEnabled: false), isFalse);
+      expect(should(linkingEnabled: false, retry: true, unknown: true,
+              checked: true),
+          isFalse);
     });
   });
 }

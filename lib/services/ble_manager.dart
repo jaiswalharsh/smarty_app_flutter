@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../dev_config.dart';
 import '../utils/wifi_utils.dart';
 import 'ble_service.dart';
+import 'link_check_service.dart';
 
 /// Outcome of a Wi-Fi provisioning attempt, derived from the device's own status
 /// characteristic — NOT merely from the BLE credential write being acknowledged.
@@ -706,9 +707,10 @@ class BleManager {
   // Status information
   String _connectedWifi = "Unknown";
   int _batteryLevel = 0;
-  // Whether the toy holds its backend secret — a DERIVED value: the toy's own
-  // status field (`"registered"`) wins; firmware that predates that field
-  // falls back to a local record kept per toy id (see [refreshRegistered]).
+  // Whether the toy is linked to this account — a DERIVED value (see
+  // [deriveRegistered]): the toy's own status field (`"registered"`) wins;
+  // firmware that predates that field falls back to a local record kept per
+  // toy id (see [refreshRegistered]); the account check can overrule both.
   // null = unknown (not read yet, or the toy's id couldn't be read).
   final ValueNotifier<bool?> _registered = ValueNotifier(null);
   bool? _statusRegistered; // from the status JSON; null = not reported
@@ -721,6 +723,15 @@ class BleManager {
   // rest of the connection state (disconnect, forgetToy, sign-out).
   BluetoothDevice? _linkedOnConnection;
   Future<void>? _localRegLoad;
+  // "Linked" must mean linked to THIS account: the toy's `registered` only
+  // says it holds SOME key (maybe another account's, a deleted account's, or
+  // a dev emulator's). Once per connection, a toy that counts as linked is
+  // checked against the account's records (see [_checkAccount]).
+  final LinkCheck _linkCheck = LinkCheckService();
+  BluetoothDevice? _accountCheckFor; // connection the check belongs to
+  Future<void>? _accountCheck; // in flight or finished, for that connection
+  bool _accountCheckSettled = false;
+  bool? _accountHasToy; // its answer; null = not asked / can't tell
   // ab06 id per BLE id, filled by readDeviceId(). Survives link drops so
   // markRegistered() can write the local record even while reconnecting.
   final Map<String, String> _toyDeviceIdByRemote = {};
@@ -741,42 +752,139 @@ class BleManager {
   String get connectedWifi => _connectedWifi;
   int get batteryLevel => _batteryLevel;
 
-  /// Whether the toy holds its backend secret. The toy's status JSON
-  /// (`"registered"`) wins; for firmware without that field it comes from a
-  /// local record kept per toy (written by [markRegistered]) — `false` when
-  /// the toy's id is readable but no record exists. null = unknown (not read
-  /// yet, or the id couldn't be read).
+  /// Whether the toy is linked to this account (holds its backend secret).
+  /// The toy's status JSON (`"registered"`) wins; for firmware without that
+  /// field it comes from a local record kept per toy (written by
+  /// [markRegistered]) — `false` when the toy's id is readable but no record
+  /// exists. Either way, `false` when the account's records say the toy isn't
+  /// on this account (checked once per connection — see [deriveRegistered]).
+  /// null = unknown (not read yet, or the id couldn't be read).
   bool? get registered => _registered.value;
 
   /// Listenable form of [registered] (fires on status updates, when the
-  /// local record loads, and on [markRegistered]).
+  /// local record loads, when the account check answers, and on
+  /// [markRegistered]).
   ValueListenable<bool?> get registeredListenable => _registered;
 
   /// Same as [registered]; kept for existing callers.
   bool? get deviceRegistered => _registered.value;
 
-  /// [registered] from its inputs (pure, for tests): the toy's status field
-  /// wins over the local record — except that once this app linked the toy
-  /// on the current connection ([linkedThisConnection]), a `false` status is
-  /// a stale pre-link value and is ignored (`true` is still accepted).
+  /// [registered] from its inputs (pure, for tests), first match wins:
+  /// 1. this app linked the toy on the current connection
+  ///    ([linkedThisConnection]) → true (a `false` status is a stale pre-link
+  ///    value);
+  /// 2. the account's records say the toy isn't on this account
+  ///    ([accountHasToy] == false) → false, whatever the toy says — its key
+  ///    belongs to someone else (or to nobody any more);
+  /// 3. otherwise the toy's status field, else the local record.
+  /// [accountHasToy] null (not checked, offline, signed out) changes nothing.
   static bool? deriveRegistered({
     required bool? statusRegistered,
     required bool? localRegistered,
     bool linkedThisConnection = false,
+    bool? accountHasToy,
   }) {
     if (linkedThisConnection) return true;
+    if (accountHasToy == false) return false;
     return statusRegistered ?? localRegistered;
+  }
+
+  /// Whether to start the account check for the connected toy (pure, for
+  /// tests). Only with the account link on ([linkingEnabled]), only for a toy
+  /// that currently counts as linked ([registered] true — a "not linked" can't
+  /// get more "not linked"), never once this app linked it on this connection,
+  /// and once per connection ([checkedThisConnection]): an answer of "can't
+  /// tell" ([lastAnswerUnknown]) is retried only when a caller asks
+  /// ([retryUnknown] — the setup page's link step).
+  static bool shouldStartAccountCheck({
+    bool linkingEnabled = DevConfig.linkingEnabled,
+    required bool? registered,
+    required bool linkedThisConnection,
+    required bool checkedThisConnection,
+    bool lastAnswerUnknown = false,
+    bool retryUnknown = false,
+  }) {
+    if (!linkingEnabled || linkedThisConnection || registered != true) {
+      return false;
+    }
+    if (!checkedThisConnection) return true;
+    return retryUnknown && lastAnswerUnknown;
   }
 
   bool get _linkedThisConnection =>
       _linkedOnConnection != null && _linkedOnConnection == _connectedDevice;
+
+  bool get _accountCheckedThisConnection =>
+      _accountCheckFor != null && _accountCheckFor == _connectedDevice;
 
   void _updateRegistered() {
     _registered.value = deriveRegistered(
       statusRegistered: _statusRegistered,
       localRegistered: _localRegistered,
       linkedThisConnection: _linkedThisConnection,
+      accountHasToy: _accountCheckedThisConnection ? _accountHasToy : null,
     );
+    // The toy now counts as linked (status / local record): make sure it is
+    // linked to THIS account. Single-flight, once per connection.
+    if (_registered.value == true) unawaited(_checkAccount());
+  }
+
+  /// Check the connected toy against this account's records (see
+  /// [LinkCheck]) when [shouldStartAccountCheck] says so; otherwise return
+  /// the check already running / done on this connection (or nothing).
+  /// A "not on this account" answer makes [registered] false for the rest of
+  /// this connection — Home then offers "Finish setup" and the setup page
+  /// runs its link step. "Can't tell" changes nothing.
+  Future<void> _checkAccount({bool retryUnknown = false}) {
+    final BluetoothDevice? device = _connectedDevice;
+    if (device == null) return Future.value();
+    final bool checked = _accountCheckedThisConnection && _accountCheck != null;
+    if (shouldStartAccountCheck(
+      registered: _registered.value,
+      linkedThisConnection: _linkedThisConnection,
+      checkedThisConnection: checked,
+      lastAnswerUnknown: _accountCheckSettled && _accountHasToy == null,
+      retryUnknown: retryUnknown,
+    )) {
+      _accountCheckFor = device;
+      _accountHasToy = null;
+      _accountCheckSettled = false;
+      return _accountCheck = _runAccountCheck(device);
+    }
+    return checked ? _accountCheck! : Future.value();
+  }
+
+  Future<void> _runAccountCheck(BluetoothDevice device) async {
+    bool current() =>
+        _connectedDevice == device && _accountCheckFor == device;
+    try {
+      String? id = _toyDeviceIdByRemote[device.remoteId.str];
+      if (!_idReadable(id)) id = await readDeviceId();
+      if (!current()) return;
+      if (!_idReadable(id)) {
+        debugPrint("⚠️ BleManager: account check skipped (no toy id)");
+        return;
+      }
+      final bool? onAccount = await _linkCheck.isLinkedToThisAccount(id!);
+      if (!current()) return;
+      _accountHasToy = onAccount;
+      if (onAccount == false && !_linkedThisConnection) {
+        debugPrint("🔗 BleManager: toy $id is not linked to this account — "
+            "setup must link it (toy says registered: $_statusRegistered)");
+      }
+      _updateRegistered();
+    } catch (e) {
+      debugPrint("⚠️ BleManager: account check failed: $e");
+    } finally {
+      if (_accountCheckFor == device) _accountCheckSettled = true;
+    }
+  }
+
+  void _clearAccountCheck() {
+    _accountCheckFor = null;
+    _accountCheck = null;
+    _accountCheckSettled = false;
+    _accountHasToy = null;
   }
 
   /// Call after a successful device-secret write: flip the flag ourselves
@@ -814,21 +922,25 @@ class BleManager {
       id != null && id.trim().isNotEmpty && id != '{}';
 
   /// Make [registered] as definite as possible for the connected toy and
-  /// return it: reads the status if the toy hasn't reported yet, and for
+  /// return it: reads the status if the toy hasn't reported yet, for
   /// firmware without the `registered` field loads the local record keyed by
-  /// the toy's id. Returns null if it still can't tell (or nothing is
-  /// connected).
+  /// the toy's id, and — when that says "linked" — waits for the check that
+  /// it is linked to THIS account (≤ ~5 s; retried here if it couldn't tell
+  /// earlier on this connection). Returns null if it still can't tell (or
+  /// nothing is connected).
   Future<bool?> refreshRegistered() async {
     final device = _connectedDevice;
     if (device == null) return _registered.value;
     if (_statusRegistered == null) {
       await readStatusUpdate();
     }
-    if (_statusRegistered != null || _connectedDevice != device) {
-      return _registered.value;
+    if (_connectedDevice != device) return _registered.value;
+    if (_statusRegistered == null) {
+      await (_localRegLoad ??= _loadLocalRegistered(device)
+          .whenComplete(() => _localRegLoad = null));
+      if (_connectedDevice != device) return _registered.value;
     }
-    await (_localRegLoad ??= _loadLocalRegistered(device)
-        .whenComplete(() => _localRegLoad = null));
+    await _checkAccount(retryUnknown: true);
     return _registered.value;
   }
 
@@ -978,9 +1090,11 @@ class BleManager {
       _servicesResetSubscription =
           device.onServicesReset.listen((_) => _onServicesReset(device, gen));
       // Fresh link: registration is re-learned from this toy's status (or
-      // its local record) — never carried over from before.
+      // its local record) and the account check — never carried over from
+      // before.
       _statusRegistered = null;
       _localRegistered = null;
+      _clearAccountCheck();
       _updateRegistered();
       debugPrint("🔄 BleManager: Initializing with device: ${device.platformName}");
 
@@ -1059,7 +1173,8 @@ class BleManager {
 
       // First status read (notifications only carry changes). With the
       // account link on, also settle [registered] for firmware that can't
-      // report it (local record by toy id).
+      // report it (local record by toy id), and check that a toy that says
+      // it's linked is linked to THIS account.
       unawaited(DevConfig.linkingEnabled
           ? refreshRegistered().then((_) {})
           : readStatusUpdate());
@@ -1220,6 +1335,7 @@ class BleManager {
     _statusRegistered = null;
     _localRegistered = null;
     _linkedOnConnection = null;
+    _clearAccountCheck();
     _registered.value = null;
     _connectedDevice = null;
   }

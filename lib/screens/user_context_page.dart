@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -148,8 +149,22 @@ class UserContextLengthCounter extends StatelessWidget {
   }
 }
 
+/// Whether "About your child" waits for Smarty's copy before showing any
+/// text on open (pure, for tests): only when Smarty is connected and there is
+/// no unsent edit on the phone (that edit wins and is sent instead).
+/// Otherwise the phone's copy for this account shows right away.
+bool waitForToyCopyOnOpen({
+  required bool toyConnected,
+  required bool hasPendingSync,
+}) =>
+    toyConnected && !hasPendingSync;
+
 class UserContextPage extends StatefulWidget {
-  const UserContextPage({super.key});
+  const UserContextPage({super.key, @visibleForTesting this.toyPhase});
+
+  /// Where the app stands with Smarty; [BleManager.phase] unless a test
+  /// supplies its own.
+  final ValueListenable<ToyPhase>? toyPhase;
 
   @override
   State<UserContextPage> createState() => _UserContextPageState();
@@ -162,11 +177,20 @@ class _UserContextPageState extends State<UserContextPage> {
   /// is enforced silently by [Utf8ByteLimitFormatter] as a safety net.
   static const int maxChars = 500;
 
+  /// Status line while Smarty's copy is being read.
+  static const String fetchingLabel = 'Getting the latest from Smarty…';
+
   final TextEditingController _controller = TextEditingController();
   final BleManager _bleManager = BleManager();
+  late final ValueListenable<ToyPhase> _phase =
+      widget.toyPhase ?? _bleManager.phase;
   ToyPhase? _lastPhase;
   bool _dirty = false;
   bool _bootstrapped = false;
+  // On open with Smarty connected and nothing unsent on the phone: Smarty's
+  // copy is being fetched (bounded by the provider). The field stays empty
+  // and disabled meanwhile, so the phone's older copy never flashes first.
+  bool _loadingFromToy = false;
   // Text is over the toy's byte budget (only possible for text set in code,
   // since the input formatter blocks typing past it). Disables Save.
   bool _overLimit = false;
@@ -194,32 +218,58 @@ class _UserContextPageState extends State<UserContextPage> {
     return _limitFormatter;
   }
 
+  bool get _toyConnected => _phase.value == ToyPhase.connected;
+
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
-    _lastPhase = _bleManager.phase.value;
+    _lastPhase = _phase.value;
 
     // Load the latest from the toy after the first frame so the provider is
     // available via context.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       final provider = context.read<UserContextProvider>();
-      _controller.text = provider.context;
-      _dirty = false;
+      if (waitForToyCopyOnOpen(
+        toyConnected: _toyConnected,
+        hasPendingSync: provider.hasPendingSync,
+      )) {
+        // Smarty's copy is the one that counts: show "Getting the latest…"
+        // until it arrives (or the read gives up, ~5 s), not the phone's copy.
+        setState(() => _loadingFromToy = true);
+      } else {
+        // Smarty is away (the phone's copy, with the "out of reach" note), or
+        // an unsent edit is waiting (it wins and is sent right away).
+        _setText(provider.context);
+      }
       await _refreshFromToy();
       if (!mounted) return;
-      setState(() => _bootstrapped = true);
+      if (_loadingFromToy && !_dirty) {
+        // Smarty's copy — or, if it couldn't be read, this account's copy on
+        // the phone (the provider then says Smarty is out of reach).
+        _setText(provider.context);
+      }
+      setState(() {
+        _loadingFromToy = false;
+        _bootstrapped = true;
+      });
     });
 
     // Update the status row on every phase change, and pick up the toy's copy
     // when it comes back (`connected` = characteristics ready to read).
-    _bleManager.phase.addListener(_onPhaseChanged);
+    _phase.addListener(_onPhaseChanged);
+  }
+
+  void _setText(String text) {
+    _controller.text = text;
+    _dirty = false;
+    _tooLongNotice.value = null; // new text: the old notice is stale
   }
 
   void _onPhaseChanged() {
     if (!mounted) return;
-    final phase = _bleManager.phase.value;
+    final phase = _phase.value;
     final reconnected =
         phase == ToyPhase.connected && _lastPhase != ToyPhase.connected;
     _lastPhase = phase;
@@ -230,15 +280,11 @@ class _UserContextPageState extends State<UserContextPage> {
   // Refresh from the toy (the provider pushes a pending local edit instead
   // when there is one) and show the result unless the parent is mid-edit.
   Future<void> _refreshFromToy() async {
-    if (!_bleManager.isConnected) return;
+    if (!_toyConnected) return;
     final provider = context.read<UserContextProvider>();
     await provider.refreshFromDevice();
     if (!mounted) return;
-    if (!_dirty) {
-      _controller.text = provider.context;
-      _dirty = false;
-      _tooLongNotice.value = null; // new text: the old notice is stale
-    }
+    if (!_dirty && !_loadingFromToy) _setText(provider.context);
   }
 
   void _onTextChanged() {
@@ -260,7 +306,7 @@ class _UserContextPageState extends State<UserContextPage> {
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _tooLongNotice.dispose();
-    _bleManager.phase.removeListener(_onPhaseChanged);
+    _phase.removeListener(_onPhaseChanged);
     super.dispose();
   }
 
@@ -301,7 +347,7 @@ class _UserContextPageState extends State<UserContextPage> {
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
     final provider = context.watch<UserContextProvider>();
-    final connected = _bleManager.isConnected;
+    final connected = _toyConnected;
 
     return Scaffold(
       appBar: AppBar(
@@ -347,35 +393,13 @@ class _UserContextPageState extends State<UserContextPage> {
               _buildStatusRow(provider, connected, themeProvider),
               const SizedBox(height: 12),
               Expanded(
-                child: TextField(
-                  controller: _controller,
-                  maxLines: null,
-                  expands: true,
-                  textAlignVertical: TextAlignVertical.top,
-                  // [maxChars] characters for the parent; the toy's real
-                  // limit is in bytes (see Utf8ByteLimitFormatter).
-                  inputFormatters: [_currentLimitFormatter],
-                  enabled: _bootstrapped && !provider.isBusy,
-                  decoration: InputDecoration(
-                    hintText:
-                        "e.g. My daughter Alex is 6, loves dinosaurs, is "
-                        "learning to read, and is afraid of thunderstorms.",
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    filled: true,
-                    fillColor: themeProvider.isDarkMode
-                        ? const Color(0xFF2C2C44)
-                        : Colors.grey.shade100,
-                    contentPadding: const EdgeInsets.all(16),
-                  ),
-                  style: TextStyle(
-                    color: themeProvider.isDarkMode
-                        ? Colors.white
-                        : Colors.black87,
-                    fontSize: 15,
-                    height: 1.4,
-                  ),
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                        child: _buildField(provider, themeProvider)),
+                    if (_loadingFromToy)
+                      const Center(child: CircularProgressIndicator()),
+                  ],
                 ),
               ),
               const SizedBox(height: 6),
@@ -396,7 +420,10 @@ class _UserContextPageState extends State<UserContextPage> {
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: (provider.isBusy || !_dirty || _overLimit)
+                  onPressed: (provider.isBusy ||
+                          _loadingFromToy ||
+                          !_dirty ||
+                          _overLimit)
                       ? null
                       : _handleSave,
                   style: ElevatedButton.styleFrom(
@@ -417,6 +444,41 @@ class _UserContextPageState extends State<UserContextPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildField(
+      UserContextProvider provider, ThemeProvider themeProvider) {
+    return TextField(
+      controller: _controller,
+      maxLines: null,
+      expands: true,
+      textAlignVertical: TextAlignVertical.top,
+      // [maxChars] characters for the parent; the toy's real limit is in
+      // bytes (see Utf8ByteLimitFormatter).
+      inputFormatters: [_currentLimitFormatter],
+      enabled: _bootstrapped && !_loadingFromToy && !provider.isBusy,
+      decoration: InputDecoration(
+        // No example text while Smarty's copy is on its way: an
+        // empty-looking field would read as "nothing saved".
+        hintText: _loadingFromToy
+            ? null
+            : "e.g. My daughter Alex is 6, loves dinosaurs, is learning to "
+                "read, and is afraid of thunderstorms.",
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+        filled: true,
+        fillColor: themeProvider.isDarkMode
+            ? const Color(0xFF2C2C44)
+            : Colors.grey.shade100,
+        contentPadding: const EdgeInsets.all(16),
+      ),
+      style: TextStyle(
+        color: themeProvider.isDarkMode ? Colors.white : Colors.black87,
+        fontSize: 15,
+        height: 1.4,
       ),
     );
   }
@@ -442,10 +504,20 @@ class _UserContextPageState extends State<UserContextPage> {
     Color color;
     String label;
 
-    if (!connected) {
+    // Connected, but Smarty's copy couldn't be read in time: the phone's
+    // copy is showing — say so, the same way as when Smarty is away.
+    final bool readFailed = provider.state == ContextSyncState.idle &&
+        provider.infoMessage == UserContextProvider.offlineMessage &&
+        !_dirty;
+
+    if (!connected || readFailed) {
       icon = Icons.bluetooth_disabled;
       color = Colors.blueGrey;
       label = UserContextProvider.offlineMessage;
+    } else if (_loadingFromToy) {
+      icon = Icons.sync;
+      color = Colors.blue;
+      label = fetchingLabel;
     } else {
       switch (provider.state) {
         case ContextSyncState.loadingLocal:
@@ -456,7 +528,7 @@ class _UserContextPageState extends State<UserContextPage> {
         case ContextSyncState.fetchingFromDevice:
           icon = Icons.sync;
           color = Colors.blue;
-          label = 'Getting the latest from Smarty…';
+          label = fetchingLabel;
           break;
         case ContextSyncState.saving:
           icon = Icons.sync;
