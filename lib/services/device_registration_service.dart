@@ -6,6 +6,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../dev_config.dart';
 import 'ble_manager.dart';
 import 'auth_service.dart';
 
@@ -84,8 +85,13 @@ class RegistrationResult {
 }
 
 class DeviceRegistrationService {
-  static const String _registerDeviceUrl =
-      'https://us-central1-smarty-7e350.cloudfunctions.net/registerDevice';
+  /// The `registerDevice` Cloud Function; the local functions emulator in an
+  /// emulator build ([DevConfig.useEmulator]).
+  static const String _registerDeviceUrl = DevConfig.useEmulator
+      ? 'http://${DevConfig.emulatorHost}:${DevConfig.functionsEmulatorPort}'
+          '/${DevConfig.firebaseProjectId}/${DevConfig.functionsRegion}'
+          '/registerDevice'
+      : 'https://europe-west1-smarty-7e350.cloudfunctions.net/registerDevice';
   static const Duration _httpTimeout = Duration(seconds: 10);
   static const String _ourSideMessage =
       'Something went wrong on our side. Please try again in a minute.';
@@ -134,6 +140,10 @@ class DeviceRegistrationService {
                 'Content-Type': 'application/json',
                 'Authorization': 'Bearer $idToken',
               },
+              // TODO(tz): also send the phone's IANA time zone
+              // ({'device_id', 'timezone'}) so the backend buckets days in
+              // the parent's zone (plan §8). Needs `flutter_timezone`
+              // (DateTime.timeZoneName only gives "CEST"-style names).
               body: jsonEncode({'device_id': deviceId}),
             )
             .timeout(_httpTimeout);

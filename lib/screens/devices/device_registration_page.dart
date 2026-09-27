@@ -89,8 +89,10 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
         _fail(RegistrationFailure.deviceUnreachable);
         return;
       }
-      // The firmware doesn't re-notify status on the secret write, so flip
-      // the local flag here — whoever pushed this page sees it immediately.
+      // Flip the flag here — whoever pushed this page sees it immediately.
+      // Older firmware doesn't re-notify status on the secret write (and
+      // keeps serving "registered":false); markRegistered also makes
+      // BleManager ignore that stale value for the rest of this connection.
       BleManager().markRegistered();
 
       setState(() => _phase = _Phase.done);

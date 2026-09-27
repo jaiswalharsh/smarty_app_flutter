@@ -10,6 +10,7 @@ import 'home_tab.dart' show toyStatusLine;
 import 'services/auth_service.dart';
 import 'services/ble_manager.dart';
 import 'utils/theme_provider.dart';
+import 'widgets/dev_server_label.dart';
 
 class SettingsTab extends StatefulWidget {
   const SettingsTab({super.key});
@@ -137,6 +138,7 @@ class _SettingsTabState extends State<SettingsTab> {
                     _showHelpDialog(context);
                   },
                 ),
+                const DevServerLabel(),
               ],
             ),
           ),

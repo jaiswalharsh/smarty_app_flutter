@@ -532,6 +532,15 @@ class BleManager {
   /// is saved or it hasn't been loaded yet ([watchSavedToy] loads it).
   String? get savedToyId => _savedToyId;
 
+  /// The saved toy's own id (ab06, MAC-derived — the id its cloud records
+  /// are filed under, unlike [savedToyId] which is the phone's Bluetooth
+  /// handle), once it has been read over Bluetooth this session; else null.
+  String? get savedToyDeviceId {
+    final String? remote = _connectedDevice?.remoteId.str ?? _savedToyId;
+    final String? id = remote == null ? null : _toyDeviceIdByRemote[remote];
+    return _idReadable(id) ? id : null;
+  }
+
   /// Display name of the saved (or connected) toy, e.g. "Smarty-AB12", or
   /// null when no toy is saved. Use [toyDisplayName]/[toyCode] to render it.
   String? get savedToyName {
@@ -693,6 +702,13 @@ class BleManager {
   final ValueNotifier<bool?> _registered = ValueNotifier(null);
   bool? _statusRegistered; // from the status JSON; null = not reported
   bool? _localRegistered; // local record (old firmware); null = not loaded
+  // The connection on which [markRegistered] ran (this app just wrote the
+  // toy's secret over it), or null. While it is still the live connection a
+  // `"registered":false` status is stale — older firmware only refreshed its
+  // status value on a battery/Wi-Fi change, so reads kept returning the
+  // pre-link JSON — and must not flip [registered] back. Cleared with the
+  // rest of the connection state (disconnect, forgetToy, sign-out).
+  BluetoothDevice? _linkedOnConnection;
   Future<void>? _localRegLoad;
   // ab06 id per BLE id, filled by readDeviceId(). Survives link drops so
   // markRegistered() can write the local record even while reconnecting.
@@ -728,16 +744,39 @@ class BleManager {
   /// Same as [registered]; kept for existing callers.
   bool? get deviceRegistered => _registered.value;
 
-  void _updateRegistered() {
-    _registered.value = _statusRegistered ?? _localRegistered;
+  /// [registered] from its inputs (pure, for tests): the toy's status field
+  /// wins over the local record — except that once this app linked the toy
+  /// on the current connection ([linkedThisConnection]), a `false` status is
+  /// a stale pre-link value and is ignored (`true` is still accepted).
+  static bool? deriveRegistered({
+    required bool? statusRegistered,
+    required bool? localRegistered,
+    bool linkedThisConnection = false,
+  }) {
+    if (linkedThisConnection) return true;
+    return statusRegistered ?? localRegistered;
   }
 
-  /// Call after a successful device-secret write: the firmware does not
-  /// re-notify status on that write, so flip the flag ourselves, and keep the
-  /// local record (used by firmware that can't report the flag).
+  bool get _linkedThisConnection =>
+      _linkedOnConnection != null && _linkedOnConnection == _connectedDevice;
+
+  void _updateRegistered() {
+    _registered.value = deriveRegistered(
+      statusRegistered: _statusRegistered,
+      localRegistered: _localRegistered,
+      linkedThisConnection: _linkedThisConnection,
+    );
+  }
+
+  /// Call after a successful device-secret write: flip the flag ourselves
+  /// (older firmware doesn't re-notify status on that write, and its status
+  /// value keeps saying `"registered":false` until something else changes),
+  /// and keep the local record (used by firmware that can't report the flag).
+  /// For the rest of this connection a `"registered":false` status is ignored.
   void markRegistered() {
     if (_statusRegistered != null) _statusRegistered = true;
     _localRegistered = true;
+    _linkedOnConnection = _connectedDevice;
     _updateRegistered();
     unawaited(_persistRegistered());
   }
@@ -1169,6 +1208,7 @@ class BleManager {
     _connectedWifi = "NotConnected";
     _statusRegistered = null;
     _localRegistered = null;
+    _linkedOnConnection = null;
     _registered.value = null;
     _connectedDevice = null;
   }
@@ -1434,7 +1474,11 @@ class BleManager {
 
     // "registered" BEFORE the Wi-Fi event, so listeners that rebuild on it
     // read a consistent snapshot.
-    if (status.registered != null) {
+    if (status.registered == false && _linkedThisConnection) {
+      // Stale: we wrote this toy's secret on this very connection (see
+      // [markRegistered]); older firmware keeps serving its pre-link status.
+      debugPrint("📱 BleManager: ignoring stale registered:false (linked on this connection)");
+    } else if (status.registered != null) {
       _statusRegistered = status.registered;
       _updateRegistered();
     }

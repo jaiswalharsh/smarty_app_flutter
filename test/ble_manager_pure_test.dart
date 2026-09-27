@@ -298,4 +298,39 @@ void main() {
       expect(BleManager.profileMaxBytesFor(const ToyAdvert(version: 2)), 1024);
     });
   });
+
+  group('BleManager.deriveRegistered', () {
+    bool? derive(bool? status, bool? local, {bool linked = false}) =>
+        BleManager.deriveRegistered(
+          statusRegistered: status,
+          localRegistered: local,
+          linkedThisConnection: linked,
+        );
+
+    test('status field wins over the local record', () {
+      expect(derive(true, false), isTrue);
+      expect(derive(false, true), isFalse);
+      expect(derive(null, true), isTrue);
+      expect(derive(null, false), isFalse);
+      expect(derive(null, null), isNull);
+    });
+
+    test('a stale registered:false after linking on this connection is ignored',
+        () {
+      // Older firmware keeps serving its pre-link status JSON after the
+      // secret write; Home must not fall back to "Finish setup".
+      expect(derive(false, true, linked: true), isTrue);
+      expect(derive(false, null, linked: true), isTrue);
+      expect(derive(false, false, linked: true), isTrue);
+    });
+
+    test('registered:true is still accepted after linking', () {
+      expect(derive(true, true, linked: true), isTrue);
+      expect(derive(null, null, linked: true), isTrue);
+    });
+
+    test('a new connection (flag cleared) trusts the status again', () {
+      expect(derive(false, true, linked: false), isFalse);
+    });
+  });
 }

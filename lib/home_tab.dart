@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'dev_config.dart';
 import 'services/ble_manager.dart';
 import 'services/ble_service.dart';
+import 'screens/convos/live_chat_banner.dart';
 import 'screens/devices/setup_steps.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/wifi/wifi_config_page.dart';
@@ -836,6 +837,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
               pullRefreshing: _pullRefreshing,
             ),
           ),
+          const LiveChatBanner(), // "Smarty is talking with your child — tap to watch"
           if (needsLinkStep) ...[
             SizedBox(height: 16),
             Center(

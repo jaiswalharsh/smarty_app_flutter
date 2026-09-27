@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../main.dart';
 import '../../services/auth_service.dart';
+import '../../widgets/dev_server_label.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -438,6 +439,9 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                     ),
                   ),
+                  // Emulator builds: accounts live on the local server, so
+                  // "Sign Up" makes a fresh one there.
+                  DevServerLabel(color: Colors.white.withValues(alpha: 0.85)),
                 ],
               ),
             ),
