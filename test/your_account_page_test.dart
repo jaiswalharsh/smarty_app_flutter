@@ -23,6 +23,7 @@ class FakeAccountService implements AccountService {
   String password = 'secret123';
   AccountProblem? nameProblem;
   AccountProblem? resetProblem;
+  AccountProblem? deleteProblem;
 
   final List<String> calls = [];
 
@@ -48,6 +49,7 @@ class FakeAccountService implements AccountService {
     if (password != this.password) {
       throw const AccountException(AccountProblem.wrongPassword);
     }
+    if (deleteProblem != null) throw AccountException(deleteProblem!);
   }
 }
 
@@ -200,6 +202,32 @@ void main() {
       await tester.pumpAndSettle();
       expect(account.calls, ['delete']);
       expect(signedOut, 1);
+    });
+
+    testWidgets('says what gets deleted', (tester) async {
+      await openDialog(tester);
+      expect(
+          find.text("This deletes your Smarty account, your saved chats and "
+              "your toy's registration, and signs you out. "
+              'This phone will also forget your Smarty toy.'),
+          findsOneWidget);
+      expect(find.text("This can't be undone."), findsOneWidget);
+    });
+
+    testWidgets('server failure keeps the dialog open with a friendly message',
+        (tester) async {
+      account.deleteProblem = AccountProblem.deleteFailed;
+      await openDialog(tester);
+      await tester.enterText(find.byType(TextField), 'secret123');
+      await tester.tap(deleteButton());
+      await tester.pumpAndSettle();
+      expect(account.calls, ['delete']);
+      expect(
+          find.text("We couldn't delete your account right now. Please check "
+              'your internet and try again.'),
+          findsOneWidget);
+      expect(find.text('Delete your account?'), findsOneWidget);
+      expect(signedOut, 0);
     });
 
     testWidgets('cancel does nothing', (tester) async {

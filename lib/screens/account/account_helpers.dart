@@ -64,6 +64,9 @@ String accountProblemMessage(AccountProblem problem) {
       return 'Too many tries — please wait a few minutes and try again.';
     case AccountProblem.signInAgain:
       return 'Please sign out, sign in again, and then try once more.';
+    case AccountProblem.deleteFailed:
+      return "We couldn't delete your account right now. Please check your "
+          'internet and try again.';
     case AccountProblem.other:
       return 'Something went wrong. Please try again.';
   }

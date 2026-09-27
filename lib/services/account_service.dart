@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../dev_config.dart';
 import '../providers/user_context_provider.dart';
 import 'auth_service.dart';
 import 'ble_manager.dart';
@@ -13,6 +17,10 @@ enum AccountProblem {
   network,
   tooManyRequests,
   signInAgain,
+
+  /// Our server couldn't erase the account (offline, timeout, server error).
+  /// Nothing was deleted; trying again is safe.
+  deleteFailed,
   other,
 }
 
@@ -70,6 +78,147 @@ Future<void> signOutOfSmarty() async {
   await AuthService().signOut();
 }
 
+/// How long to wait for the `deleteAccount` Cloud Function.
+const Duration deleteAccountTimeout = Duration(seconds: 10);
+
+/// Asks our server to erase the signed-in parent's account: their saved
+/// chats, their toy's registration and the sign-in account itself (the app
+/// can't do this itself — the database rules deny client writes there).
+///
+/// POSTs to the `deleteAccount` Cloud Function with [idToken]. Returns on
+/// HTTP 200; anything else (no internet, timeout, 401, 5xx) throws
+/// [AccountProblem.deleteFailed]. [client] and [url] are for tests.
+Future<void> requestAccountDeletionOnServer(
+  String idToken, {
+  http.Client? client,
+  String? url,
+  Duration timeout = deleteAccountTimeout,
+}) async {
+  final http.Client c = client ?? http.Client();
+  try {
+    final response = await c
+        .post(
+          Uri.parse(url ?? DevConfig.functionUrl('deleteAccount')),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $idToken',
+          },
+          body: '{}',
+        )
+        .timeout(timeout);
+    if (response.statusCode == 200) return;
+    debugPrint('Account: deleteAccount HTTP ${response.statusCode}');
+  } on TimeoutException {
+    debugPrint('Account: deleteAccount timed out');
+  } catch (e) {
+    debugPrint('Account: deleteAccount request failed: $e');
+  } finally {
+    if (client == null) c.close();
+  }
+  throw const AccountException(AccountProblem.deleteFailed);
+}
+
+/// The steps of deleting an account, as functions so [runAccountDeletion]
+/// can be tested without the sign-in service, the server or Bluetooth.
+class AccountDeletionSteps {
+  const AccountDeletionSteps({
+    required this.reauthenticate,
+    required this.freshIdToken,
+    required this.deleteOnServer,
+    required this.deleteSignInAccount,
+    required this.forgetToy,
+    required this.clearLocalData,
+    required this.signOut,
+  });
+
+  /// Checks the password (also makes the sign-in "recent", which the server
+  /// requires). Throws [FirebaseAuthException] on a wrong password etc.
+  final Future<void> Function() reauthenticate;
+
+  /// A force-refreshed ID token, or null when signed out.
+  final Future<String?> Function() freshIdToken;
+
+  /// [requestAccountDeletionOnServer].
+  final Future<void> Function(String idToken) deleteOnServer;
+
+  /// `User.delete()` — a fallback only: the server has already removed the
+  /// sign-in account by the time this runs.
+  final Future<void> Function() deleteSignInAccount;
+
+  final Future<void> Function() forgetToy;
+  final Future<void> Function() clearLocalData;
+  final Future<void> Function() signOut;
+}
+
+/// Deletes the account, in an order that never leaves a half-deleted account
+/// the parent can't retry:
+///
+/// 1. Check the password (throws, nothing touched).
+/// 2. Ask the server to erase the data and the sign-in account. If that
+///    fails, stop with [AccountProblem.deleteFailed]: the account, the toy
+///    link on this phone and the saved notes all stay, and the parent can
+///    simply try again while still signed in.
+/// 3. `User.delete()` as a harmless fallback — it normally fails because the
+///    server already removed the account, which is fine.
+/// 4. Tidy up this phone (forget the toy, clear saved data, sign out); each
+///    step is best-effort because the account is already gone.
+Future<void> runAccountDeletion(AccountDeletionSteps steps) async {
+  await guardAccountAction(steps.reauthenticate);
+
+  String? idToken;
+  try {
+    idToken = await steps.freshIdToken();
+  } catch (e) {
+    debugPrint('Account: token refresh before delete failed: $e');
+    throw const AccountException(AccountProblem.deleteFailed);
+  }
+  if (idToken == null) throw const AccountException(AccountProblem.signInAgain);
+
+  try {
+    await steps.deleteOnServer(idToken);
+  } on AccountException {
+    rethrow;
+  } catch (e) {
+    debugPrint('Account: server delete failed: $e');
+    throw const AccountException(AccountProblem.deleteFailed);
+  }
+
+  // The server has deleted the sign-in account, so this usually fails with
+  // user-not-found / user-token-expired. Any failure is fine here.
+  try {
+    await steps.deleteSignInAccount();
+  } catch (e) {
+    debugPrint('Account: sign-in account already gone ($e)');
+  }
+
+  for (final (label, step) in [
+    ('forgetting the toy', steps.forgetToy),
+    ('clearing saved data', steps.clearLocalData),
+    ('sign-out after delete', steps.signOut),
+  ]) {
+    try {
+      await step();
+    } catch (e) {
+      debugPrint('⚠️ Account: $label failed: $e');
+    }
+  }
+}
+
+/// Runs [action], turning sign-in service errors into [AccountException].
+Future<void> guardAccountAction(Future<void> Function() action) async {
+  try {
+    await action();
+  } on FirebaseAuthException catch (e) {
+    debugPrint('Account: ${e.code}');
+    throw AccountException(accountProblemFromCode(e.code));
+  } on AccountException {
+    rethrow;
+  } catch (e) {
+    debugPrint('Account error: $e');
+    throw const AccountException(AccountProblem.other);
+  }
+}
+
 /// The account actions the "Your account" page needs. Abstract so the page can
 /// be tested without the sign-in service; [FirebaseAccountService] is the real
 /// one. Methods throw [AccountException] on failure.
@@ -85,8 +234,10 @@ abstract class AccountService {
 
   Future<void> signOut();
 
-  /// Checks [password], deletes the account, forgets the toy on this phone,
-  /// clears this account's saved data on the phone and signs out.
+  /// Checks [password], has the server erase the account (saved chats, toy
+  /// registration, sign-in account), then forgets the toy on this phone,
+  /// clears this account's saved data on the phone and signs out. See
+  /// [runAccountDeletion].
   Future<void> deleteAccount(String password);
 }
 
@@ -105,7 +256,7 @@ class FirebaseAccountService implements AccountService {
   Future<void> updateDisplayName(String name) async {
     final user = _user;
     if (user == null) throw const AccountException(AccountProblem.signInAgain);
-    await _guard(() async {
+    await guardAccountAction(() async {
       await user.updateDisplayName(name);
       await user.reload();
     });
@@ -117,7 +268,7 @@ class FirebaseAccountService implements AccountService {
     if (address == null || address.isEmpty) {
       throw const AccountException(AccountProblem.signInAgain);
     }
-    await _guard(() => AuthService().sendPasswordResetEmail(address));
+    await guardAccountAction(() => AuthService().sendPasswordResetEmail(address));
   }
 
   @override
@@ -131,50 +282,16 @@ class FirebaseAccountService implements AccountService {
       throw const AccountException(AccountProblem.signInAgain);
     }
     final uid = user.uid;
-    await _guard(() async {
-      // Checking the password also refreshes the sign-in, so delete() below
-      // can't fail for "signed in too long ago".
-      await user.reauthenticateWithCredential(
+    await runAccountDeletion(AccountDeletionSteps(
+      reauthenticate: () => user.reauthenticateWithCredential(
         EmailAuthProvider.credential(email: address, password: password),
-      );
-      // TODO(account-deletion): call a deleteAccount Cloud Function to erase
-      // parents/{uid} and devices_by_id entries (client writes there are
-      // denied by the rules, so this can only be done server-side). It must
-      // run here, while the user is still signed in. Required before App
-      // Store submission (guideline 5.1.1(v)).
-      await user.delete();
-    });
-
-    // The account is gone; now tidy up this phone. Done after the delete so a
-    // failed delete (e.g. no internet) leaves the toy and notes untouched.
-    try {
-      await BleManager().forgetToy();
-    } catch (e) {
-      debugPrint('⚠️ Account: forgetting the toy failed: $e');
-    }
-    try {
-      await clearLocalAccountData(uid);
-    } catch (e) {
-      debugPrint('⚠️ Account: clearing saved data failed: $e');
-    }
-    try {
-      await signOutOfSmarty();
-    } catch (e) {
-      debugPrint('⚠️ Account: sign-out after delete failed: $e');
-    }
-  }
-
-  static Future<void> _guard(Future<void> Function() action) async {
-    try {
-      await action();
-    } on FirebaseAuthException catch (e) {
-      debugPrint('Account: ${e.code}');
-      throw AccountException(accountProblemFromCode(e.code));
-    } on AccountException {
-      rethrow;
-    } catch (e) {
-      debugPrint('Account error: $e');
-      throw const AccountException(AccountProblem.other);
-    }
+      ),
+      freshIdToken: () => user.getIdToken(true),
+      deleteOnServer: requestAccountDeletionOnServer,
+      deleteSignInAccount: user.delete,
+      forgetToy: () => BleManager().forgetToy(),
+      clearLocalData: () => clearLocalAccountData(uid),
+      signOut: signOutOfSmarty,
+    ));
   }
 }

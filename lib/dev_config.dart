@@ -38,4 +38,11 @@ class DevConfig {
   /// Firebase project id and Cloud Functions region.
   static const String firebaseProjectId = 'smarty-7e350';
   static const String functionsRegion = 'europe-west1';
+
+  /// URL of the HTTP Cloud Function [name]: the local functions emulator in
+  /// an emulator build, else the deployed function.
+  static String functionUrl(String name) => useEmulator
+      ? 'http://$emulatorHost:$functionsEmulatorPort'
+          '/$firebaseProjectId/$functionsRegion/$name'
+      : 'https://$functionsRegion-$firebaseProjectId.cloudfunctions.net/$name';
 }

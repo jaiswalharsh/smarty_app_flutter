@@ -558,11 +558,9 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // TODO(account-deletion): once the server erases the account's
-          // saved data, say so here (e.g. "Your saved chats will be removed
-          // from our servers within 30 days.").
           const Text(
-            'This deletes your Smarty account and signs you out. '
+            "This deletes your Smarty account, your saved chats and your "
+            "toy's registration, and signs you out. "
             'This phone will also forget your Smarty toy.',
           ),
           const SizedBox(height: 12),
