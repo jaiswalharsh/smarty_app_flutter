@@ -43,6 +43,77 @@ void main() {
     });
   });
 
+  group('"About your child": a refused edit shows a message under the field',
+      () {
+    const tooLong = "That's too long — Smarty can take up to 10 characters.";
+
+    Future<TextEditingController> pumpPage(WidgetTester tester) async {
+      final controller = TextEditingController(text: 'abcdef');
+      final notice = ValueNotifier<String?>(null);
+      addTearDown(controller.dispose);
+      addTearDown(notice.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                TextField(
+                  controller: controller,
+                  inputFormatters: [
+                    // Wired the same way as UserContextPage.
+                    Utf8ByteLimitFormatter(
+                      1024,
+                      maxChars: 10,
+                      onRejected: (v) => notice.value =
+                          tooLongEditMessage(v.text, maxChars: 10),
+                      onAccepted: () => notice.value = null,
+                    ),
+                  ],
+                ),
+                UserContextLengthCounter(
+                  controller: controller,
+                  notice: notice,
+                  maxBytes: 1024,
+                  maxChars: 10,
+                  mutedColor: Colors.black54,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      return controller;
+    }
+
+    testWidgets('a paste past the limit keeps the text and says why',
+        (tester) async {
+      final controller = await pumpPage(tester);
+      expect(find.text('6 / 10 characters'), findsOneWidget);
+      expect(find.text(tooLong), findsNothing);
+
+      // Appending a 7-character paste to 6 characters: 13 > 10.
+      await tester.enterText(find.byType(TextField), 'abcdefghijklm');
+      await tester.pump();
+      expect(controller.text, 'abcdef'); // not cut to fit
+      expect(find.text(tooLong), findsOneWidget);
+      // The counter stays visible next to the message.
+      expect(find.text('6 / 10 characters'), findsOneWidget);
+    });
+
+    testWidgets('the next edit that fits clears the message', (tester) async {
+      final controller = await pumpPage(tester);
+      await tester.enterText(find.byType(TextField), 'abcdefghijklm');
+      await tester.pump();
+      expect(find.text(tooLong), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'abcdefg');
+      await tester.pump();
+      expect(controller.text, 'abcdefg');
+      expect(find.text(tooLong), findsNothing);
+      expect(find.text('7 / 10 characters'), findsOneWidget);
+    });
+  });
+
   group('SetupSuccessView', () {
     Finder confetti() => find.byWidgetPredicate(
           (w) => w is CustomPaint && w.painter is ConfettiPainter,

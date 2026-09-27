@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -13,15 +14,40 @@ import '../utils/theme_provider.dart';
 /// toy stores the context in a fixed byte budget, and Polish letters such as
 /// "ą" or "ż" take 2 bytes each, so a 500-character limit could overflow it.
 ///
-/// Edits that would grow the text past [maxBytes] are rejected (the previous
-/// value is kept). Edits that shrink it are always allowed, so text that is
-/// already over the limit (e.g. loaded programmatically) can still be trimmed.
+/// Edits that would grow the text past [maxBytes] (or past [maxChars]
+/// user-visible characters, when set) are rejected (the previous value is
+/// kept). Edits that shrink it are always allowed, so text that is already
+/// over a limit (e.g. loaded programmatically) can still be trimmed — never
+/// silently cut.
+///
+/// A rejected edit is never trimmed to fit (a paste is all-or-nothing, so
+/// the child's text is never cut mid-word), but it isn't silent either:
+/// [onRejected] gets the refused value so the page can say why, and
+/// [onAccepted] fires on the next edit that goes through (to clear that
+/// message). The formatter itself keeps no state.
 class Utf8ByteLimitFormatter extends TextInputFormatter {
-  Utf8ByteLimitFormatter(this.maxBytes);
+  Utf8ByteLimitFormatter(
+    this.maxBytes, {
+    this.maxChars,
+    this.onRejected,
+    this.onAccepted,
+  });
 
   final int maxBytes;
 
+  /// Optional cap in characters (grapheme clusters, as the counter shows).
+  final int? maxChars;
+
+  /// Called with the refused value when an edit is rejected for being too
+  /// long.
+  final ValueChanged<TextEditingValue>? onRejected;
+
+  /// Called when an edit that changes the text is let through.
+  final VoidCallback? onAccepted;
+
   static int byteLength(String text) => utf8.encode(text).length;
+
+  static int charLength(String text) => text.characters.length;
 
   @override
   TextEditingValue formatEditUpdate(
@@ -29,10 +55,96 @@ class Utf8ByteLimitFormatter extends TextInputFormatter {
     TextEditingValue newValue,
   ) {
     final int newBytes = byteLength(newValue.text);
-    if (newBytes <= maxBytes || newBytes <= byteLength(oldValue.text)) {
+    final bool bytesOk =
+        newBytes <= maxBytes || newBytes <= byteLength(oldValue.text);
+    final int? charCap = maxChars;
+    final bool charsOk = charCap == null ||
+        charLength(newValue.text) <= charCap ||
+        charLength(newValue.text) <= charLength(oldValue.text);
+    if (bytesOk && charsOk) {
+      if (newValue.text != oldValue.text) onAccepted?.call();
       return newValue;
     }
+    onRejected?.call(newValue);
     return oldValue;
+  }
+}
+
+/// Inline message under the field when an edit (usually a paste) was refused
+/// for being too long. [rejectedText] is the text the edit would have made.
+/// Pure (tests). Past the character cap, name it; otherwise the toy's byte
+/// budget ran out first (Polish letters, emoji), which a parent can't count,
+/// so just say it doesn't fit.
+String tooLongEditMessage(String rejectedText, {required int maxChars}) =>
+    Utf8ByteLimitFormatter.charLength(rejectedText) > maxChars
+        ? "That's too long — Smarty can take up to $maxChars characters."
+        : "That's too long — Smarty can't fit any more.";
+
+/// Live "N / 500 characters" counter under the "About your child" field,
+/// plus — after an edit was refused for being too long — [notice] on the
+/// left (see [tooLongEditMessage]). Never shows bytes: when the toy's byte
+/// budget runs out first it just says the text is as long as it can be.
+class UserContextLengthCounter extends StatelessWidget {
+  const UserContextLengthCounter({
+    super.key,
+    required this.controller,
+    required this.notice,
+    required this.maxBytes,
+    required this.maxChars,
+    required this.mutedColor,
+  });
+
+  final TextEditingController controller;
+
+  /// The "too long" message to show, or null for none.
+  final ValueListenable<String?> notice;
+  final int maxBytes;
+  final int maxChars;
+  final Color mutedColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([controller, notice]),
+      builder: (context, _) {
+        final String text = controller.text;
+        final int bytes = Utf8ByteLimitFormatter.byteLength(text);
+        final int chars = Utf8ByteLimitFormatter.charLength(text);
+        if (bytes > maxBytes || chars > maxChars) {
+          // Already over (text set in code): Save is off; say so.
+          return Align(
+            alignment: Alignment.centerRight,
+            child: Text(
+              UserContextProvider.tooLongMessage,
+              style: const TextStyle(fontSize: 12, color: Colors.red),
+            ),
+          );
+        }
+        final String label = bytes >= maxBytes
+            ? "That's as long as it can be."
+            : '$chars / $maxChars characters';
+        final String? message = notice.value;
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: message == null
+                  ? const SizedBox.shrink()
+                  : Text(
+                      message,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.red.shade600,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+            ),
+            const SizedBox(width: 8),
+            Text(label, style: TextStyle(fontSize: 12, color: mutedColor)),
+          ],
+        );
+      },
+    );
   }
 }
 
@@ -44,10 +156,10 @@ class UserContextPage extends StatefulWidget {
 }
 
 class _UserContextPageState extends State<UserContextPage> {
-  /// Length limit shown to parents. The real limit is the toy's UTF-8 byte
-  /// budget ([BleManager.userContextMaxBytes], enforced silently by
-  /// [Utf8ByteLimitFormatter]); every character takes at least one byte, so
-  /// the character count can never pass this.
+  /// Length limit shown to parents, enforced in characters. Behind it the
+  /// toy's UTF-8 byte budget ([BleManager.userContextMaxBytes] — 1024 on
+  /// current firmware, so 500 Polish characters fit; 500 on older firmware)
+  /// is enforced silently by [Utf8ByteLimitFormatter] as a safety net.
   static const int maxChars = 500;
 
   final TextEditingController _controller = TextEditingController();
@@ -58,8 +170,29 @@ class _UserContextPageState extends State<UserContextPage> {
   // Text is over the toy's byte budget (only possible for text set in code,
   // since the input formatter blocks typing past it). Disables Save.
   bool _overLimit = false;
-  final TextInputFormatter _byteLimitFormatter =
-      Utf8ByteLimitFormatter(BleManager.userContextMaxBytes);
+  // "That's too long…" under the field after an edit (usually a paste) was
+  // refused; cleared by the next edit that goes through.
+  final ValueNotifier<String?> _tooLongNotice = ValueNotifier<String?>(null);
+  // Rebuilt when the toy's byte budget changes (e.g. a different toy).
+  late Utf8ByteLimitFormatter _limitFormatter =
+      _makeLimitFormatter(BleManager.userContextMaxBytesLegacy);
+
+  Utf8ByteLimitFormatter _makeLimitFormatter(int maxBytes) =>
+      Utf8ByteLimitFormatter(
+        maxBytes,
+        maxChars: maxChars,
+        onRejected: (rejected) => _tooLongNotice.value =
+            tooLongEditMessage(rejected.text, maxChars: maxChars),
+        onAccepted: () => _tooLongNotice.value = null,
+      );
+
+  Utf8ByteLimitFormatter get _currentLimitFormatter {
+    final int maxBytes = _bleManager.userContextMaxBytes;
+    if (_limitFormatter.maxBytes != maxBytes) {
+      _limitFormatter = _makeLimitFormatter(maxBytes);
+    }
+    return _limitFormatter;
+  }
 
   @override
   void initState() {
@@ -104,6 +237,7 @@ class _UserContextPageState extends State<UserContextPage> {
     if (!_dirty) {
       _controller.text = provider.context;
       _dirty = false;
+      _tooLongNotice.value = null; // new text: the old notice is stale
     }
   }
 
@@ -111,7 +245,8 @@ class _UserContextPageState extends State<UserContextPage> {
     final provider = context.read<UserContextProvider>();
     final nowDirty = _controller.text != provider.context;
     final nowOverLimit = Utf8ByteLimitFormatter.byteLength(_controller.text) >
-        BleManager.userContextMaxBytes;
+            _bleManager.userContextMaxBytes ||
+        Utf8ByteLimitFormatter.charLength(_controller.text) > maxChars;
     if (nowDirty != _dirty || nowOverLimit != _overLimit) {
       setState(() {
         _dirty = nowDirty;
@@ -124,6 +259,7 @@ class _UserContextPageState extends State<UserContextPage> {
   void dispose() {
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
+    _tooLongNotice.dispose();
     _bleManager.phase.removeListener(_onPhaseChanged);
     super.dispose();
   }
@@ -216,10 +352,9 @@ class _UserContextPageState extends State<UserContextPage> {
                   maxLines: null,
                   expands: true,
                   textAlignVertical: TextAlignVertical.top,
-                  // The toy's real limit is in bytes (see
-                  // Utf8ByteLimitFormatter); the counter below talks in
-                  // characters.
-                  inputFormatters: [_byteLimitFormatter],
+                  // [maxChars] characters for the parent; the toy's real
+                  // limit is in bytes (see Utf8ByteLimitFormatter).
+                  inputFormatters: [_currentLimitFormatter],
                   enabled: _bootstrapped && !provider.isBusy,
                   decoration: InputDecoration(
                     hintText:
@@ -286,33 +421,15 @@ class _UserContextPageState extends State<UserContextPage> {
     );
   }
 
-  // Live "N / 500 characters" counter. Rebuilds on every keystroke via the
-  // controller, without rebuilding the whole page. Never shows bytes: when
-  // the toy's byte budget runs out first (Polish letters, emoji) it just says
-  // the text is as long as it can be.
+  // Rebuilds on every keystroke via the controller, without rebuilding the
+  // whole page.
   Widget _buildLengthCounter(ThemeProvider themeProvider) {
-    return ValueListenableBuilder<TextEditingValue>(
-      valueListenable: _controller,
-      builder: (context, value, _) {
-        final int bytes = Utf8ByteLimitFormatter.byteLength(value.text);
-        const int maxBytes = BleManager.userContextMaxBytes;
-        final Color muted =
-            themeProvider.isDarkMode ? Colors.white54 : Colors.black54;
-        final String label;
-        Color color = muted;
-        if (bytes > maxBytes) {
-          label = UserContextProvider.tooLongMessage;
-          color = Colors.red;
-        } else if (bytes >= maxBytes) {
-          label = "That's as long as it can be.";
-        } else {
-          label = '${value.text.characters.length} / $maxChars characters';
-        }
-        return Align(
-          alignment: Alignment.centerRight,
-          child: Text(label, style: TextStyle(fontSize: 12, color: color)),
-        );
-      },
+    return UserContextLengthCounter(
+      controller: _controller,
+      notice: _tooLongNotice,
+      maxBytes: _bleManager.userContextMaxBytes,
+      maxChars: maxChars,
+      mutedColor: themeProvider.isDarkMode ? Colors.white54 : Colors.black54,
     );
   }
 

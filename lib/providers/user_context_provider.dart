@@ -234,7 +234,7 @@ class UserContextProvider with ChangeNotifier {
     // Reject up front what the toy can't store, so an oversize edit is never
     // parked as a pending sync that can never succeed.
     final int bytes = utf8.encode(newContext).length;
-    if (bytes > BleManager.userContextMaxBytes) {
+    if (bytes > BleManager().userContextMaxBytes) {
       debugPrint('UserContextProvider: context too long ($bytes bytes)');
       _state = ContextSyncState.error;
       _errorMessage = tooLongMessage;

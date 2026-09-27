@@ -39,13 +39,20 @@ void main() {
       (ToyPhase.connected, 'HomeNet', true, null, true, false, true,
           'Ready to play'),
       (ToyPhase.connected, 'Auth Failed', true, 'HomeNet', false, false, true,
-          "Smarty can't join 'HomeNet' — was the password changed?"),
+          "Smarty can't connect to 'HomeNet' — the password may have changed."),
       (ToyPhase.connected, 'Auth Failed', true, null, false, false, true,
-          "Smarty can't join your Wi-Fi — was the password changed?"),
+          "Smarty can't connect to your Wi-Fi — the password may have changed."),
       (ToyPhase.connected, 'Auth Failed', true, 'HomeNet', true, false, true,
           "Can't join Wi-Fi"),
       (ToyPhase.connected, 'Connection Failed', true, null, true, false, true,
           "Can't reach Wi-Fi"),
+      (ToyPhase.connected, 'Connection Failed', true, 'HomeNet', false, false,
+          true, "Smarty can't reach 'HomeNet' — is the router on? It keeps trying."),
+      (ToyPhase.connected, 'Connection Failed', true, null, false, false, true,
+          "Smarty can't reach your Wi-Fi — is the router on? It keeps trying."),
+      // Some other failure token: trouble, not "not set up yet".
+      (ToyPhase.connected, 'DHCP Failed', true, null, false, false, true,
+          'Smarty is having trouble with Wi-Fi'),
       (ToyPhase.connected, 'Reconnecting', true, null, false, false, true,
           'Smarty is joining Wi-Fi…'),
       (ToyPhase.connected, 'No credentials', true, null, false, false, true,
@@ -73,6 +80,81 @@ void main() {
         );
       });
     }
+
+    test('not nearby but just seen: on and connecting', () {
+      expect(
+          toyStatusLineFor(
+              phase: ToyPhase.notNearby,
+              wifi: '',
+              registered: null,
+              seenRecently: true),
+          'Smarty is on — connecting…');
+      expect(
+          toyStatusLineFor(
+              phase: ToyPhase.notNearby,
+              wifi: '',
+              registered: null,
+              seenRecently: true,
+              short: true),
+          'On — connecting…');
+      expect(
+          toyStatusLineFor(
+              phase: ToyPhase.notNearby, wifi: '', registered: null),
+          "Smarty is asleep or out of reach. Turn it on — it'll connect by "
+          'itself.');
+    });
+
+    test('connected, no status yet, advert says not on Wi-Fi', () {
+      String line({
+        String wifi = 'Unknown',
+        bool? advertWifiUp,
+        bool stalled = false,
+        bool short = false,
+      }) =>
+          toyStatusLineFor(
+            phase: ToyPhase.connected,
+            wifi: wifi,
+            registered: null,
+            advertWifiUp: advertWifiUp,
+            statusStalled: stalled,
+            short: short,
+            linkingEnabled: true,
+          );
+      // Not "yet": the advert doesn't say whether Wi-Fi was ever set up.
+      expect(line(advertWifiUp: false), "Smarty isn't on Wi-Fi right now");
+      expect(line(advertWifiUp: false, short: true), 'Not on Wi-Fi');
+      expect(line(advertWifiUp: true), 'Checking on Smarty…');
+      expect(line(), 'Checking on Smarty…');
+      // A stalled read still offers the retry.
+      expect(line(advertWifiUp: false, stalled: true),
+          "Couldn't check on Smarty");
+      // The toy's own status always wins over the advert.
+      expect(line(wifi: 'HomeNet', advertWifiUp: false), 'Ready to play');
+    });
+
+    test('"isn\'t on Wi-Fi yet" only for No credentials', () {
+      const statuses = [
+        'Unknown', '', 'NotConnected', 'Initializing', 'Reconnecting',
+        'Auth Failed', 'Connection Failed', 'DHCP Failed', 'HomeNet',
+        'No credentials',
+      ];
+      for (final wifi in statuses) {
+        for (final advert in [null, true, false]) {
+          for (final short in [true, false]) {
+            final line = toyStatusLineFor(
+              phase: ToyPhase.connected,
+              wifi: wifi,
+              registered: true,
+              advertWifiUp: advert,
+              short: short,
+              linkingEnabled: true,
+            );
+            expect(line.contains('Wi-Fi yet'), wifi == 'No credentials',
+                reason: '"$wifi" advert=$advert short=$short: $line');
+          }
+        }
+      }
+    });
 
     test('never uses jargon', () {
       for (final phase in ToyPhase.values) {

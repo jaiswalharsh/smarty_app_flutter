@@ -11,13 +11,15 @@ import '../../services/device_registration_service.dart';
 import '../wifi/wifi_network_page.dart';
 import 'device_registration_page.dart';
 import 'setup_steps.dart';
+import '../../widgets/numbered_steps.dart';
 
 /// "Set up Smarty": adds a new toy (or re-pairs one). Reconnecting a toy that
 /// is already set up is Home's job (BleManager.watchSavedToy), not this page's.
 ///
 /// Flow: instructions → live look for toys → the parent taps their toy →
 /// connect (the phone asks to pair) → link to the account → Wi-Fi → done.
-/// Never connects to a toy the parent didn't tap (see [_onScanResults]).
+/// Connects by itself only to a lone toy that says it is waiting to pair;
+/// everything else waits for a tap (see [_onScanResults]).
 ///
 /// Pops `true` when the toy ends up linked and on Wi-Fi (Home celebrates);
 /// pops with no result when the parent leaves early ("Later", back button).
@@ -44,13 +46,12 @@ enum _Stage {
   /// Checking / doing the account link.
   linking,
 
-  /// Waiting (briefly) for the toy's first Wi-Fi status.
+  /// "Checking Smarty's Wi-Fi…": waiting (up to [wifiCheckWait]) for the
+  /// toy's status, or for it to join its saved Wi-Fi.
   checkingWifi,
 
-  /// The toy is joining Wi-Fi by itself.
-  wifiJoining,
-
-  /// The toy needs the parent to set up Wi-Fi.
+  /// The Wi-Fi step needs the parent; which prompt is in
+  /// [SmartyConnectionPageState._wifiDecision].
   wifiNeeded,
 
   /// All set — popping back to Home.
@@ -64,30 +65,33 @@ enum _Stage {
 const Set<_Stage> _afterConnectStages = {
   _Stage.linking,
   _Stage.checkingWifi,
-  _Stage.wifiJoining,
   _Stage.wifiNeeded,
 };
 
 class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   final BleManager _ble = BleManager();
 
-  /// Upper bound for the toy's first Wi-Fi status after connecting.
-  static const Duration _firstStatusWait = Duration(seconds: 5);
-
-  /// How long "Smarty is joining Wi-Fi…" may last before we offer setup.
-  static const Duration _joiningWait = Duration(seconds: 15);
-
   /// Restart the look if the scan stopped under us (checked this often).
   static const Duration _scanWatchdog = Duration(seconds: 10);
 
-  /// Toys drop off the list after going quiet this long (e.g. the 30-second
-  /// wait ended).
+  /// Toys drop off the list after going quiet this long (e.g. the toy's
+  /// pairing wait ended).
   static const Duration _removeIfGone = Duration(seconds: 8);
 
   _Stage _stage = _Stage.scanning;
 
   // ---- Looking ---------------------------------------------------------------
+  // Toys offered as tiles (see isSetupCandidate).
   final List<ScanResult> _found = [];
+  // What each toy seen in this look advertises (null = old firmware), by BLE
+  // id — including toys left off the list.
+  final Map<String, ToyAdvert?> _advertById = {};
+  // A toy is around that says it isn't waiting to pair (not listed).
+  bool _seenNotPairing = false;
+  // Pending "connect to the lone pairing toy by itself" (see
+  // _maybeScheduleAutoSelect) and the toy it is for.
+  Timer? _autoSelectTimer;
+  DeviceIdentifier? _autoSelectId;
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
   BluetoothAdapterState _adapter = FlutterBluePlus.adapterStateNow;
@@ -117,7 +121,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   bool _linkDone = false;
   bool _wifiPageOpen = false;
   StreamSubscription<String>? _wifiSub;
-  Timer? _joiningTimer;
+  // Wi-Fi check (see decideWifiStep): when it (or its Try again) started,
+  // whether it is a Try again, the periodic status re-read, and the
+  // [wifiCheckWait] deadline.
+  DateTime _wifiCheckStart = DateTime.now();
+  bool _wifiRetrying = false;
+  Timer? _wifiRecheckTimer;
+  Timer? _wifiDeadlineTimer;
+  WifiDecision _wifiDecision = WifiDecision.checking;
 
   @override
   void initState() {
@@ -146,8 +157,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _ble.phase.removeListener(_onPhaseChanged);
     _adapterSub?.cancel();
     _tick?.cancel();
+    _autoSelectTimer?.cancel();
     _wifiSub?.cancel();
-    _joiningTimer?.cancel();
+    _cancelWifiTimers();
     _flowGen++;
     unawaited(_stopScan());
     super.dispose();
@@ -234,7 +246,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _flowGen++;
     _wifiSub?.cancel();
     _wifiSub = null;
-    _joiningTimer?.cancel();
+    _cancelWifiTimers();
     setState(() => _stage = _Stage.lost);
   }
 
@@ -288,9 +300,12 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       _runAfterConnect();
       return;
     }
+    _cancelAutoSelect();
     setState(() {
       _stage = _Stage.scanning;
       _found.clear();
+      _advertById.clear();
+      _seenNotPairing = false;
       _failure = null;
       _scanError = false;
       _blockerFromError = null;
@@ -324,7 +339,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _ble.cancelProbe();
     try {
       // No timeout: keep looking while the page is open. continuousUpdates +
-      // removeIfGone let a toy whose 30-second wait ended drop off the list.
+      // removeIfGone let a toy whose pairing wait ended drop off the list, and
+      // keep each toy's advert (pairing flag) fresh.
       await FlutterBluePlus.startScan(
         withServices: [BleManager.smartyServiceGuid],
         continuousUpdates: true,
@@ -368,42 +384,105 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     return adv.isNotEmpty ? adv : r.device.platformName;
   }
 
-  // Results only ever become tiles; nothing connects until the parent taps
-  // one. No auto-select, not even for a lone toy: a toy bonded to ANOTHER
-  // phone advertises exactly like one waiting in pairing mode (the advert
-  // carries no pairing-mode marker, and the firmware accepts pairing from any
-  // phone), so connecting by ourselves could pair the neighbour's Smarty.
-  // Auto-select needs a pairing-mode flag in the firmware's advert first.
+  // Newer firmware says in its advert whether it is waiting to pair (see
+  // ToyAdvert). A toy that says it isn't — set up with another phone, or
+  // already set up — is left off the list; firmware that says nothing is
+  // listed as before. Results become tiles, and the parent taps one — except
+  // for a lone toy that says it IS waiting to pair: after a short "Smarty
+  // found!" beat we connect to it by ourselves (shouldAutoSelect). Never for
+  // firmware that says nothing: a toy bonded to ANOTHER phone advertises
+  // exactly like one in pairing mode there (and the firmware accepts pairing
+  // from any phone), so connecting by ourselves could pair the neighbour's
+  // Smarty.
   void _onScanResults(List<ScanResult> results) {
     if (!mounted) return;
     if (_stage != _Stage.scanning) return;
 
+    final List<ScanResult> candidates = [];
+    bool seenNotPairing = false;
+    for (final r in results) {
+      final advert = ToyAdvert.fromScanResult(r);
+      _advertById[r.device.remoteId.str] = advert;
+      if (isSetupCandidate(advert)) {
+        candidates.add(r);
+      } else {
+        seenNotPairing = true;
+      }
+    }
+
     String keyOf(ScanResult r) => '${r.device.remoteId.str}|${_nameOf(r)}';
-    bool changed = results.length != _found.length;
-    for (int i = 0; !changed && i < results.length; i++) {
-      changed = keyOf(results[i]) != keyOf(_found[i]);
+    bool changed = candidates.length != _found.length ||
+        seenNotPairing != _seenNotPairing;
+    for (int i = 0; !changed && i < candidates.length; i++) {
+      changed = keyOf(candidates[i]) != keyOf(_found[i]);
     }
     if (!changed) {
       // Same toys, fresher adverts — no rebuild needed.
       _found
         ..clear()
-        ..addAll(results);
+        ..addAll(candidates);
+    } else {
+      setState(() {
+        _found
+          ..clear()
+          ..addAll(candidates);
+        _seenNotPairing = seenNotPairing;
+        _hint = _currentHint();
+      });
+    }
+    _maybeScheduleAutoSelect();
+  }
+
+  ScanHint _currentHint() => scanHintFor(
+        DateTime.now().difference(_lookingSince),
+        anyFound: _found.isNotEmpty,
+        seenNotPairing: _seenNotPairing,
+      );
+
+  List<ToyAdvert?> get _candidateAdverts =>
+      [for (final r in _found) _advertById[r.device.remoteId.str]];
+
+  bool get _canAutoSelect =>
+      mounted &&
+      _stage == _Stage.scanning &&
+      !_connecting &&
+      _blocker == null &&
+      shouldAutoSelect(_candidateAdverts);
+
+  // Arm (or drop) the "connect to the lone pairing toy by itself" timer. The
+  // wait lets "Smarty found!" show first; everything is re-checked when it
+  // fires, so a second toy appearing (or the parent tapping) wins.
+  void _maybeScheduleAutoSelect() {
+    if (!_canAutoSelect) {
+      _cancelAutoSelect();
       return;
     }
-
-    setState(() {
-      _found
-        ..clear()
-        ..addAll(results);
-      if (_found.isNotEmpty) _hint = ScanHint.none;
+    final id = _found.single.device.remoteId;
+    if (_autoSelectTimer != null && _autoSelectId == id) return;
+    _autoSelectTimer?.cancel();
+    _autoSelectId = id;
+    _autoSelectTimer = Timer(autoSelectDelay, () {
+      _autoSelectTimer = null;
+      _autoSelectId = null;
+      if (!_canAutoSelect) return;
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      final r = _found.single;
+      if (r.device.remoteId != id) return;
+      debugPrint('SmartyConnectionPage: lone toy waiting to pair — connecting');
+      _connect(r.device, _nameOf(r));
     });
+  }
+
+  void _cancelAutoSelect() {
+    _autoSelectTimer?.cancel();
+    _autoSelectTimer = null;
+    _autoSelectId = null;
   }
 
   void _onTick() {
     if (!mounted || _stage != _Stage.scanning) return;
     final now = DateTime.now();
-    final hint =
-        scanHintFor(now.difference(_lookingSince), anyFound: _found.isNotEmpty);
+    final hint = _currentHint();
     if (hint != _hint) setState(() => _hint = hint);
 
     // Watchdog: another screen's scan (or the OS) may have stopped ours.
@@ -422,6 +501,13 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   Future<void> _connect(BluetoothDevice device, String name) async {
     if (_connecting) return;
     _connecting = true;
+    _cancelAutoSelect();
+    // Remember what this toy advertised (its profile size depends on it); it
+    // stops advertising once connected.
+    final id = device.remoteId.str;
+    if (_advertById.containsKey(id)) {
+      _ble.rememberAdvertVersion(id, _advertById[id]);
+    }
     setState(() {
       _stage = _Stage.connecting;
       _target = device;
@@ -445,6 +531,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
               : ToyPhase.needsPermission;
           _stage = _Stage.scanning;
           _found.clear();
+          _advertById.clear();
+          _seenNotPairing = false;
           _lookingSince = DateTime.now();
         });
         return;
@@ -480,7 +568,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     final int gen = ++_flowGen;
     _wifiSub?.cancel();
     _wifiSub = null;
-    _joiningTimer?.cancel();
+    _cancelWifiTimers();
     setState(() => _stage = _Stage.linking);
 
     if (!await _linkStep(gen)) return;
@@ -549,7 +637,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _flowGen++;
     _wifiSub?.cancel();
     _wifiSub = null;
-    _joiningTimer?.cancel();
+    _cancelWifiTimers();
     // Stage first: forgetToy() moves the phase, which must not read as
     // "lost touch".
     if (mounted) {
@@ -562,75 +650,90 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _target = null;
   }
 
+  void _cancelWifiTimers() {
+    _wifiRecheckTimer?.cancel();
+    _wifiRecheckTimer = null;
+    _wifiDeadlineTimer?.cancel();
+    _wifiDeadlineTimer = null;
+  }
+
+  /// What the toy we connected advertised about Wi-Fi just before we
+  /// connected (null = not seen in this look, or not reported).
+  bool? get _advertWifiUp {
+    final id = _ourToy?.remoteId.str;
+    return id == null ? null : _advertById[id]?.wifiUp;
+  }
+
   Future<void> _wifiStep(int gen) async {
-    setState(() => _stage = _Stage.checkingWifi);
-
-    WifiStep step = wifiStepFor(_ble.connectedWifi);
-    if (step == WifiStep.unknown) {
-      // Wait for the toy's first status (bounded), not a fixed poll.
-      step = await _waitForFirstWifiStatus();
-      if (_stale(gen)) return;
-    }
-
-    // Keep following the toy's status while we're on the Wi-Fi step: it may
-    // finish joining by itself, or report a failure.
+    // Follow the toy's status for the whole Wi-Fi step: it may finish
+    // joining its saved Wi-Fi by itself, or report a problem.
     _wifiSub?.cancel();
-    _wifiSub = _ble.wifiStatusStream.listen((status) {
+    _wifiSub = _ble.wifiStatusStream.listen((_) {
       if (_stale(gen) || _ble.phase.value != ToyPhase.connected) return;
       if (_stage == _Stage.done || _wifiPageOpen) return;
-      _applyWifiStep(wifiStepFor(status), gen);
+      _evaluateWifi(gen);
     });
-    _applyWifiStep(step, gen);
+    _startWifiCheck(gen);
   }
 
-  Future<WifiStep> _waitForFirstWifiStatus() async {
-    final done = Completer<WifiStep>();
-    final sub = _ble.wifiStatusStream.listen((status) {
-      final s = wifiStepFor(status);
-      if (s != WifiStep.unknown && !done.isCompleted) done.complete(s);
-    });
-    // The read initialize() fired may have come back empty; ask again.
-    unawaited(_ble.readStatusUpdate());
-    try {
-      return await done.future.timeout(
-        _firstStatusWait,
-        onTimeout: () => wifiStepFor(_ble.connectedWifi),
-      );
-    } finally {
-      await sub.cancel();
-    }
-  }
-
-  void _applyWifiStep(WifiStep step, int gen) {
+  /// Start (or restart, for Try again / Check again) the Wi-Fi check: ask the
+  /// toy now and every [wifiRecheckEvery], and decide by [wifiCheckWait].
+  void _startWifiCheck(int gen, {bool retrying = false}) {
     if (_stale(gen)) return;
-    switch (step) {
-      case WifiStep.connected:
+    _cancelWifiTimers();
+    _wifiCheckStart = DateTime.now();
+    _wifiRetrying = retrying;
+    _wifiRecheckTimer = Timer.periodic(wifiRecheckEvery, (_) {
+      if (_stale(gen) || _stage != _Stage.checkingWifi || _wifiPageOpen) return;
+      unawaited(_ble.readStatusUpdate());
+      _evaluateWifi(gen);
+    });
+    _wifiDeadlineTimer = Timer(wifiCheckWait, () => _evaluateWifi(gen));
+    unawaited(_ble.readStatusUpdate());
+    _evaluateWifi(gen);
+  }
+
+  void _evaluateWifi(int gen) {
+    if (_stale(gen) || _stage == _Stage.done || _wifiPageOpen) return;
+    final WifiDecision d = decideWifiStep(
+      status: _ble.connectedWifi,
+      advertWifiUp: _advertWifiUp,
+      waited: DateTime.now().difference(_wifiCheckStart),
+      retrying: _wifiRetrying,
+    );
+    switch (d) {
+      case WifiDecision.connected:
         _finish(gen);
         return;
-      case WifiStep.joining:
-        if (_stage == _Stage.wifiJoining) return;
-        setState(() => _stage = _Stage.wifiJoining);
-        _joiningTimer?.cancel();
-        _joiningTimer = Timer(_joiningWait, () {
-          if (_stale(gen) || _stage != _Stage.wifiJoining) return;
-          // Still joining after a while: re-evaluate, and offer setup if the
-          // toy hasn't made it.
-          final now = wifiStepFor(_ble.connectedWifi);
-          if (now == WifiStep.connected) {
-            _finish(gen);
-          } else {
-            setState(() => _stage = _Stage.wifiNeeded);
-          }
-        });
+      case WifiDecision.checking:
+        if (_stage != _Stage.checkingWifi) {
+          setState(() => _stage = _Stage.checkingWifi);
+        }
         return;
-      case WifiStep.needsSetup:
-      case WifiStep.unknown:
-        _joiningTimer?.cancel();
-        if (_stage != _Stage.wifiNeeded) {
-          setState(() => _stage = _Stage.wifiNeeded);
+      case WifiDecision.needsSetup:
+      case WifiDecision.authFailed:
+      case WifiDecision.unreachable:
+      case WifiDecision.couldNotCheck:
+        // An answer: stop polling (the status stream still follows the toy,
+        // e.g. it joins its saved Wi-Fi later and setup finishes by itself).
+        _cancelWifiTimers();
+        _wifiRetrying = false;
+        if (_stage != _Stage.wifiNeeded || _wifiDecision != d) {
+          setState(() {
+            _stage = _Stage.wifiNeeded;
+            _wifiDecision = d;
+          });
         }
         return;
     }
+  }
+
+  /// Try again / Check again: show "Checking…" and wait again.
+  void _recheckWifi({required bool retrying}) {
+    final int gen = _flowGen;
+    if (_stale(gen)) return;
+    setState(() => _stage = _Stage.checkingWifi);
+    _startWifiCheck(gen, retrying: retrying);
   }
 
   Future<void> _openWifiSetup() async {
@@ -655,14 +758,15 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       _finish(gen);
       return;
     }
-    _applyWifiStep(wifiStepFor(_ble.connectedWifi), gen);
+    // Back without joining: check where the toy stands now.
+    _startWifiCheck(gen);
   }
 
   void _finish(int gen) {
     if (_stale(gen) || _stage == _Stage.done) return;
     _wifiSub?.cancel();
     _wifiSub = null;
-    _joiningTimer?.cancel();
+    _cancelWifiTimers();
     setState(() => _stage = _Stage.done);
     // `true` tells Home to celebrate — only when Smarty can actually talk
     // (linked). An unlinked toy lands on Home's "Finish setup" instead.
@@ -763,7 +867,6 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         ];
       case _Stage.linking:
       case _Stage.checkingWifi:
-      case _Stage.wifiJoining:
       case _Stage.wifiNeeded:
       case _Stage.done:
         return [
@@ -792,8 +895,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
 
   Widget _buildInstructionsCard() {
     final bool emphasise = _stage == _Stage.scanning &&
-        _hint == ScanHint.stoppedWaiting &&
+        (_hint == ScanHint.stoppedWaiting ||
+            _hint == ScanHint.notReadyToPair) &&
         _blocker == null;
+    final TextStyle bodyStyle = TextStyle(
+      fontSize: 16,
+      height: 1.35,
+      color: emphasise ? Colors.orange.shade800 : Colors.blue.shade800,
+    );
     return AnimatedContainer(
       duration: const Duration(milliseconds: 250),
       padding: const EdgeInsets.all(16),
@@ -832,17 +941,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                   ),
                 ),
                 const SizedBox(height: 6),
-                Text(
-                  'Turn Smarty on, then hold the + and – buttons together for '
-                  '3 seconds. Smarty will wait 30 seconds for your phone.',
-                  style: TextStyle(
-                    fontSize: 16,
-                    height: 1.35,
-                    color: emphasise
-                        ? Colors.orange.shade800
-                        : Colors.blue.shade800,
-                  ),
-                ),
+                Text(setupFirstBootLine, style: bodyStyle),
+                const SizedBox(height: 6),
+                Text(setupButtonHoldLine, style: bodyStyle),
               ],
             ),
           ),
@@ -916,7 +1017,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     if (tiles.isNotEmpty) {
       out.add(const SizedBox(height: 16));
       for (final t in tiles) {
-        // A lone toy gets a clear "Tap to connect" — the parent still taps.
+        // A lone toy gets a clear "Tap to connect". If it said it is waiting
+        // to pair we connect by ourselves after a moment anyway.
         out.add(_toyTile(t.$1, t.$2,
             highlight: !connecting && tiles.length == 1));
       }
@@ -940,13 +1042,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     if (_stage == _Stage.scanning) {
       final String? hintText = _scanError
           ? 'Something got in the way while looking for Smarty. Tap Look again.'
-          : switch (_hint) {
-              ScanHint.none => null,
-              ScanHint.stillLooking =>
-                'Still looking — did you hold both buttons?',
-              ScanHint.stoppedWaiting =>
-                'Smarty stopped waiting. Hold the + and – buttons again.',
-            };
+          : scanHintText(_hint);
       if (hintText != null) {
         out
           ..add(const SizedBox(height: 20))
@@ -955,7 +1051,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
             textAlign: TextAlign.center,
             style: TextStyle(
               fontSize: 15,
-              color: _hint == ScanHint.stoppedWaiting || _scanError
+              color: _hint == ScanHint.stoppedWaiting ||
+                      _hint == ScanHint.notReadyToPair ||
+                      _scanError
                   ? Colors.orange.shade800
                   : _secondaryTextColor,
             ),
@@ -1037,7 +1135,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
           ? Icons.link_off
           : Icons.error_outline,
       iconColor: Colors.orange.shade400,
-      text: connectFailureMessage(kind, isIOS: isIOS),
+      // Pairing broken: the heading line, then the steps as a numbered list
+      // (same words as Home). Other failures: one line.
+      text: kind == ConnectFailure.pairingBroken
+          ? pairingBrokenHeading
+          : connectFailureMessage(kind, isIOS: isIOS),
+      steps: kind == ConnectFailure.pairingBroken
+          ? pairingBrokenStepList(isIOS: isIOS)
+          : null,
       actions: [
         _primaryButton('Try again', Icons.refresh, _lookAgain),
         if (kind == ConnectFailure.pairingBroken && isIOS) ...[
@@ -1075,9 +1180,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       iconColor: Colors.blue.shade400,
       heading: 'Bluetooth is off',
       text: 'Turn on Bluetooth on your phone to reach Smarty',
-      hint: isIOS
-          ? 'Swipe down from the top-right corner and tap the Bluetooth icon.'
-          : null,
+      // iOS: "Open Settings" can only open this app's page in Settings.
+      hint: isIOS ? bluetoothOffHintIOS : null,
       actions: [
         _primaryButton(
           isIOS ? 'Open Settings' : 'Turn on',
@@ -1093,6 +1197,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     required Color iconColor,
     String? heading,
     required String text,
+    List<String>? steps,
     String? hint,
     required List<Widget> actions,
   }) {
@@ -1121,6 +1226,13 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
             color: heading != null ? _secondaryTextColor : _headingColor,
           ),
         ),
+        if (steps != null) ...[
+          const SizedBox(height: 12),
+          NumberedSteps(
+            steps: steps,
+            style: TextStyle(fontSize: 16, color: _secondaryTextColor),
+          ),
+        ],
         if (hint != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -1153,8 +1265,6 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
 
   Widget _buildProgress() {
     final bool linking = _stage == _Stage.linking;
-    final bool wifiActive = _stage == _Stage.checkingWifi ||
-        _stage == _Stage.wifiJoining;
 
     final _StepState linkState = linking
         ? _StepState.active
@@ -1174,13 +1284,11 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
             : _stage == _Stage.wifiNeeded
                 ? _StepState.attention
                 : _StepState.active;
-    final String wifiLabel = _stage == _Stage.wifiJoining
-        ? 'Smarty is joining Wi-Fi…'
-        : wifiActive
-            ? 'Checking Wi-Fi…'
-            : _stage == _Stage.done
-                ? 'On Wi-Fi'
-                : 'Wi-Fi';
+    final String wifiLabel = _stage == _Stage.checkingWifi
+        ? wifiCheckingLabel
+        : _stage == _Stage.done
+            ? 'On Wi-Fi'
+            : 'Wi-Fi';
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -1245,24 +1353,58 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   }
 
   Widget _buildWifiPrompt() {
+    final WifiDecision d = _wifiDecision;
+    final bool problem =
+        d == WifiDecision.authFailed || d == WifiDecision.unreachable;
+    final VoidCallback? openWifi = _wifiPageOpen ? null : _openWifiSetup;
+
+    final IconData icon = switch (d) {
+      WifiDecision.couldNotCheck => Icons.wifi_find,
+      _ when problem => Icons.wifi_off,
+      _ => Icons.wifi,
+    };
+    final Color iconColor =
+        d == WifiDecision.needsSetup ? Colors.blue.shade400 : Colors.orange.shade400;
+    final String message =
+        wifiDecisionMessage(d, ssid: _ble.lastKnownWifiName) ?? '';
+
+    final List<Widget> actions = switch (d) {
+      WifiDecision.authFailed || WifiDecision.unreachable => [
+          Center(
+            child: _primaryButton('Try again', Icons.refresh,
+                () => _recheckWifi(retrying: true)),
+          ),
+          const SizedBox(height: 8),
+          Center(
+            child: _secondaryButton(
+                'Use a different Wi-Fi', Icons.wifi, openWifi),
+          ),
+        ],
+      WifiDecision.couldNotCheck => [
+          Center(
+            child: _primaryButton('Check again', Icons.refresh,
+                () => _recheckWifi(retrying: false)),
+          ),
+          const SizedBox(height: 8),
+          Center(child: _secondaryButton('Set up Wi-Fi', Icons.wifi, openWifi)),
+        ],
+      _ => [
+          Center(child: _primaryButton('Connect Wi-Fi', Icons.wifi, openWifi)),
+        ],
+    };
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Icon(Icons.wifi, size: 48, color: Colors.blue.shade400),
+        Icon(icon, size: 48, color: iconColor),
         const SizedBox(height: 12),
         Text(
-          'Last step: connect Smarty to your home Wi-Fi. It only takes a minute.',
+          message,
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 17, color: _headingColor),
         ),
         const SizedBox(height: 20),
-        Center(
-          child: _primaryButton(
-            'Connect Wi-Fi',
-            Icons.wifi,
-            _wifiPageOpen ? null : _openWifiSetup,
-          ),
-        ),
+        ...actions,
         const SizedBox(height: 8),
         Center(
           child: TextButton(
@@ -1271,6 +1413,21 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _secondaryButton(
+      String label, IconData icon, VoidCallback? onPressed) {
+    return OutlinedButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 20),
+      label: Text(label, style: const TextStyle(fontSize: 16)),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Colors.blue.shade700,
+        side: BorderSide(color: Colors.blue.shade300),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
     );
   }
 }

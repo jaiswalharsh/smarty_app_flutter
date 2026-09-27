@@ -8,6 +8,7 @@ import 'services/ble_service.dart';
 import 'screens/devices/setup_steps.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/wifi/wifi_config_page.dart';
+import 'widgets/numbered_steps.dart';
 
 /// One-line, parent-facing status for the toy, shared by Home (full) and
 /// Settings ([short]). Plain words only — no "device", "scan", "BLE".
@@ -17,6 +18,7 @@ String toyStatusLine(
   bool short = false,
   bool statusStalled = false,
 }) {
+  final bool seenRecently = ble.savedToySeenRecently;
   return toyStatusLineFor(
     phase: ble.phase.value,
     wifi: ble.connectedWifi,
@@ -24,12 +26,20 @@ String toyStatusLine(
     lastKnownWifiName: ble.lastKnownWifiName,
     short: short,
     statusStalled: statusStalled,
+    seenRecently: seenRecently,
+    advertWifiUp: seenRecently ? ble.lastSeenAdvert?.wifiUp : null,
   );
 }
 
 /// [toyStatusLine] from plain values (pure, for tests). [wifi] is the raw
 /// status value the toy reported; [linkingEnabled] defaults to the build's
 /// [DevConfig.linkingEnabled].
+///
+/// [seenRecently]: the toy was just seen advertising, so it is on — in
+/// [ToyPhase.notNearby] that means "connecting", not "asleep".
+/// [advertWifiUp]: the Wi-Fi flag from that recent advert (null = not
+/// reported); lets a connected toy show "not on Wi-Fi" before its first
+/// status arrives.
 String toyStatusLineFor({
   required ToyPhase phase,
   required String wifi,
@@ -38,6 +48,8 @@ String toyStatusLineFor({
   bool short = false,
   bool statusStalled = false,
   bool linkingEnabled = DevConfig.linkingEnabled,
+  bool seenRecently = false,
+  bool? advertWifiUp,
 }) {
   switch (phase) {
     case ToyPhase.noToy:
@@ -53,6 +65,9 @@ String toyStatusLineFor({
     case ToyPhase.probing:
       return 'Looking for Smarty…';
     case ToyPhase.notNearby:
+      if (seenRecently) {
+        return short ? 'On — connecting…' : 'Smarty is on — connecting…';
+      }
       return short
           ? 'Asleep or out of reach'
           : "Smarty is asleep or out of reach. Turn it on — it'll connect by itself.";
@@ -70,30 +85,68 @@ String toyStatusLineFor({
   final bool waiting =
       status.isEmpty || status == 'Unknown' || status == 'NotConnected';
   if (waiting) {
-    return statusStalled ? "Couldn't check on Smarty" : 'Checking on Smarty…';
+    if (statusStalled) return "Couldn't check on Smarty";
+    // The toy's advert already said it isn't on Wi-Fi — but not why (no
+    // Wi-Fi saved, or its saved Wi-Fi is down), so no "yet" here.
+    if (advertWifiUp == false) {
+      return short ? 'Not on Wi-Fi' : "Smarty isn't on Wi-Fi right now";
+    }
+    return 'Checking on Smarty…';
   }
   if (linkingEnabled && registered == false) {
     return 'Almost done — finish setup';
   }
   switch (status) {
+    // Same words as the setup page (setup_steps.dart).
     case 'Auth Failed':
-      final ssid = lastKnownWifiName;
       if (short) return "Can't join Wi-Fi";
-      return ssid != null
-          ? "Smarty can't join '$ssid' — was the password changed?"
-          : "Smarty can't join your Wi-Fi — was the password changed?";
+      return wifiAuthFailedLine(lastKnownWifiName);
     case 'Connection Failed':
       return short
           ? "Can't reach Wi-Fi"
-          : "Smarty can't reach your Wi-Fi — is the router on? It keeps trying.";
+          : '${wifiUnreachableLine(lastKnownWifiName)} It keeps trying.';
     case 'Initializing':
     case 'Reconnecting':
       return 'Smarty is joining Wi-Fi…';
+    case 'No credentials':
+      // The only state that means "Wi-Fi was never set up on this toy".
+      return short ? 'Not on Wi-Fi yet' : "Smarty isn't on Wi-Fi yet";
   }
   if (!BleManager.isWifiConnectedStatus(wifi)) {
-    return short ? 'Not on Wi-Fi yet' : "Smarty isn't on Wi-Fi yet";
+    return short ? 'Wi-Fi trouble' : 'Smarty is having trouble with Wi-Fi';
   }
   return 'Ready to play';
+}
+
+/// Whether Home's toy card shows its small inline spinner. Pure (tests).
+///
+/// Probing / connecting always spin — except while a pull-to-refresh is
+/// running ([pullRefreshing]): the pull's own spinner is already on screen,
+/// so the card keeps only its text (one spinner at a time). Connected: only
+/// while the first status is still on its way ([waitingForStatus]) and not
+/// given up on ([statusStalled]), and not when the toy's advert already said
+/// it isn't on Wi-Fi ([advertSaysNoWifi]).
+bool homeToyCardBusy({
+  required ToyPhase phase,
+  bool waitingForStatus = false,
+  bool statusStalled = false,
+  bool advertSaysNoWifi = false,
+  bool pullRefreshing = false,
+}) {
+  if (pullRefreshing) return false;
+  switch (phase) {
+    case ToyPhase.probing:
+    case ToyPhase.connecting:
+      return true;
+    case ToyPhase.connected:
+      return waitingForStatus && !statusStalled && !advertSaysNoWifi;
+    case ToyPhase.noToy:
+    case ToyPhase.bluetoothOff:
+    case ToyPhase.needsPermission:
+    case ToyPhase.notNearby:
+    case ToyPhase.pairingBroken:
+      return false;
+  }
 }
 
 class HomeTab extends StatefulWidget {
@@ -114,6 +167,22 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   Timer? _wifiStallTimer;
   bool _wifiStatusStalled = false;
   static const Duration _wifiStallTimeout = Duration(seconds: 4);
+  // Repaints "Smarty is on — connecting…" back to "asleep or out of reach"
+  // once the probe's sighting is no longer recent.
+  Timer? _sightingTimer;
+  // A pull-to-refresh is running: its own spinner is showing, so the cards
+  // hide theirs (one spinner at a time).
+  bool _pullRefreshing = false;
+  // Looking / connecting for longer than [_busyHintAfter]: the busy view then
+  // offers "Check again" instead of spinning with no way out.
+  Timer? _busyTimer;
+  bool _busyLong = false;
+  static const Duration _busyHintAfter = Duration(seconds: 12);
+  // Upper bounds for a manual refresh, so the pull spinner always ends. The
+  // work itself carries on in the background (BleManager keeps re-reading a
+  // transitional status by itself).
+  static const Duration _statusReadBound = Duration(seconds: 4);
+  static const Duration _watchBound = Duration(seconds: 6);
 
   @override
   void initState() {
@@ -147,17 +216,58 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _bleManager.registeredListenable.removeListener(_onRegisteredChanged);
     _wifiStatusSubscription?.cancel();
     _wifiStallTimer?.cancel();
+    _sightingTimer?.cancel();
+    _busyTimer?.cancel();
     _animationController.dispose();
     super.dispose();
   }
 
   void _onPhaseChanged() {
-    if (_bleManager.phase.value == ToyPhase.connected) {
+    final ToyPhase phase = _bleManager.phase.value;
+    if (phase == ToyPhase.connected) {
       _armWifiStallTimer();
     } else {
       _wifiStallTimer?.cancel();
       _wifiStatusStalled = false;
     }
+    _armSightingTimer();
+    _armBusyTimer(phase);
+  }
+
+  // Probing and connecting share one clock: a look that finds the toy and
+  // goes straight on to connecting is still one wait for the parent.
+  void _armBusyTimer(ToyPhase phase) {
+    final bool busy = phase == ToyPhase.probing || phase == ToyPhase.connecting;
+    if (!busy) {
+      _busyTimer?.cancel();
+      _busyTimer = null;
+      _busyLong = false; // the ValueListenableBuilder rebuild picks this up
+      return;
+    }
+    if (_busyTimer != null || _busyLong) return;
+    _busyTimer = Timer(_busyHintAfter, () {
+      _busyTimer = null;
+      if (!mounted) return;
+      final ToyPhase now = _bleManager.phase.value;
+      if (now != ToyPhase.probing && now != ToyPhase.connecting) return;
+      setState(() => _busyLong = true);
+    });
+  }
+
+  // While not nearby but just seen, rebuild when the sighting goes stale.
+  void _armSightingTimer() {
+    _sightingTimer?.cancel();
+    _sightingTimer = null;
+    final seenAt = _bleManager.lastSeenAt;
+    if (_bleManager.phase.value != ToyPhase.notNearby || seenAt == null) {
+      return;
+    }
+    final left =
+        BleManager.recentSightingWindow - DateTime.now().difference(seenAt);
+    if (left <= Duration.zero) return;
+    _sightingTimer = Timer(left, () {
+      if (mounted) setState(() {});
+    });
   }
 
   void _onRegisteredChanged() {
@@ -181,21 +291,45 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _animationController.forward(from: 0);
   }
 
-  // Manual status refresh (pull-to-refresh, or the "couldn't check" retry): a
-  // fresh read of the status, then re-arm the stall watch if we're still
-  // waiting on a first value.
+  // Manual status refresh (pull-to-refresh, "Check again", the Wi-Fi card's
+  // retry): a fresh read of the status when connected, otherwise a fresh
+  // look for the toy. Always completes within a few seconds — a
+  // RefreshIndicator spins until it does — while the read / look itself
+  // carries on in the background and updates the screen when it lands.
   Future<void> _refreshStatus() async {
     if (!_bleManager.isConnected) {
-      await _bleManager.watchSavedToy();
+      await _bleManager
+          .watchSavedToy()
+          .timeout(_watchBound, onTimeout: () {})
+          .catchError((Object e) {
+            debugPrint('HomeTab: check failed: $e');
+          });
+      if (mounted) _armWifiStallTimer();
       return;
     }
-    await _bleManager.readStatusUpdate();
+    await _bleManager
+        .readStatusUpdate()
+        .timeout(_statusReadBound, onTimeout: () {})
+        .catchError((Object e) {
+          debugPrint('HomeTab: status read failed: $e');
+        });
     if (!mounted) return;
     setState(() {
       _wifiStatusStalled = false;
     });
     // Empty read (still "Unknown")? Re-arm the watchdog. Also cancels any prior timer.
     _armWifiStallTimer();
+  }
+
+  // Pull-to-refresh: the same refresh, with the cards' own spinners hidden
+  // while the pull's spinner shows.
+  Future<void> _onPullToRefresh() async {
+    if (mounted) setState(() => _pullRefreshing = true);
+    try {
+      await _refreshStatus();
+    } finally {
+      if (mounted) setState(() => _pullRefreshing = false);
+    }
   }
 
   bool get _waitingForStatus {
@@ -256,13 +390,12 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
       child: Scaffold(
+        // No outer padding: the pull-to-refresh views pad inside their
+        // scroll area, so a pull works right up to the screen's edges.
         body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(20.0),
-            child: ValueListenableBuilder<ToyPhase>(
-              valueListenable: _bleManager.phase,
-              builder: (context, phase, _) => _buildForPhase(phase),
-            ),
+          child: ValueListenableBuilder<ToyPhase>(
+            valueListenable: _bleManager.phase,
+            builder: (context, phase, _) => _buildForPhase(phase),
           ),
         ),
       ),
@@ -272,9 +405,11 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   Widget _buildForPhase(ToyPhase phase) {
     switch (phase) {
       case ToyPhase.noToy:
-        return _buildNeverPairedView();
+        return Padding(padding: _pagePadding, child: _buildNeverPairedView());
       case ToyPhase.connected:
-        return _showSuccessState ? _buildSuccessView() : _buildConnectedView();
+        return _showSuccessState
+            ? Padding(padding: _pagePadding, child: _buildSuccessView())
+            : _buildConnectedView();
       case ToyPhase.probing:
       case ToyPhase.connecting:
         return _buildBusyView(phase);
@@ -290,6 +425,18 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   // ---- Shared building blocks ----------------------------------------------
+
+  static const EdgeInsets _pagePadding = EdgeInsets.all(20);
+
+  // Every pull-to-refresh view goes through here, so a pull works from
+  // anywhere on the screen — including the empty space below short content.
+  Widget _pullToRefresh({required Widget child}) {
+    return PullToRefreshArea(
+      onRefresh: _onPullToRefresh,
+      padding: _pagePadding,
+      child: child,
+    );
+  }
 
   // The toy's own card: name ("Smarty"), the 4-char code as small secondary
   // text, and a one-line status. [busy] shows a small inline spinner.
@@ -312,11 +459,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
               color: Colors.blue.shade100,
               shape: BoxShape.circle,
             ),
-            child: Image.asset(
-              'assets/images/icon.png',
-              width: 24,
-              height: 24,
-            ),
+            child: Image.asset('assets/images/icon.png', width: 24, height: 24),
           ),
           SizedBox(width: 12),
           Expanded(
@@ -433,69 +576,58 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
-  // Centered "something needs doing" layout: icon, heading, body, actions.
-  // Pull-to-refresh re-runs the check, and the toy card stays on top so the
-  // parent always sees which Smarty this is about.
+  // Centered "something needs doing" layout: icon, heading, body (or
+  // [bodySteps], a numbered list), actions. Pull-to-refresh re-runs the
+  // check, and the toy card stays on top so the parent always sees which
+  // Smarty this is about.
   Widget _buildMessageView({
     required IconData icon,
     required Color iconColor,
     required String heading,
-    required String body,
+    String? body,
+    List<String>? bodySteps,
     String? hint,
     required List<Widget> actions,
     bool showToyCard = true,
     String? toyCardSubtitle,
   }) {
-    return RefreshIndicator(
-      onRefresh: _bleManager.watchSavedToy,
-      child: LayoutBuilder(
-        builder: (context, constraints) => SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: constraints.maxHeight),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (showToyCard)
-                  _buildToyCard(subtitle: toyCardSubtitle ?? heading),
-                SizedBox(height: 40),
-                Icon(icon, size: 56, color: iconColor),
-                SizedBox(height: 16),
-                Text(
-                  heading,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                    color: _headingColor,
-                  ),
-                ),
-                SizedBox(height: 12),
-                Text(
-                  body,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: _secondaryTextColor,
-                  ),
-                ),
-                if (hint != null) ...[
-                  SizedBox(height: 8),
-                  Text(
-                    hint,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: _secondaryTextColor,
-                    ),
-                  ),
-                ],
-                SizedBox(height: 24),
-                for (final a in actions) Center(child: a),
-              ],
+    final TextStyle bodyStyle = TextStyle(
+      fontSize: 16,
+      color: _secondaryTextColor,
+    );
+    return _pullToRefresh(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (showToyCard) _buildToyCard(subtitle: toyCardSubtitle ?? heading),
+          SizedBox(height: 40),
+          Icon(icon, size: 56, color: iconColor),
+          SizedBox(height: 16),
+          Text(
+            heading,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+              color: _headingColor,
             ),
           ),
-        ),
+          SizedBox(height: 12),
+          if (bodySteps != null)
+            NumberedSteps(steps: bodySteps, style: bodyStyle)
+          else
+            Text(body ?? '', textAlign: TextAlign.center, style: bodyStyle),
+          if (hint != null) ...[
+            SizedBox(height: 8),
+            Text(
+              hint,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: _secondaryTextColor),
+            ),
+          ],
+          SizedBox(height: 24),
+          for (final a in actions) Center(child: a),
+        ],
       ),
     );
   }
@@ -507,11 +639,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Image.asset(
-            'assets/images/icon.png',
-            width: 80,
-            height: 80,
-          ),
+          Image.asset('assets/images/icon.png', width: 80, height: 80),
           SizedBox(height: 20),
           Text(
             "Let's set up your Smarty",
@@ -525,10 +653,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
           Text(
             'It only takes a minute — then the fun can start!',
             textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 16,
-              color: _secondaryTextColor,
-            ),
+            style: TextStyle(fontSize: 16, color: _secondaryTextColor),
           ),
           SizedBox(height: 24),
           _buildPrimaryButton(
@@ -542,17 +667,35 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   // Probing / connecting: just the toy card with an inline spinner — nothing
-  // full-screen, nothing blocking.
+  // full-screen, nothing blocking. If it drags on, offer a visible way out
+  // (pull-to-refresh alone is easy to miss).
   Widget _buildBusyView(ToyPhase phase) {
-    return RefreshIndicator(
-      onRefresh: _bleManager.watchSavedToy,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
+    return _pullToRefresh(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildToyCard(
             subtitle: toyStatusLine(_bleManager),
-            busy: true,
+            busy: homeToyCardBusy(
+              phase: phase,
+              pullRefreshing: _pullRefreshing,
+            ),
           ),
+          if (_busyLong) ...[
+            SizedBox(height: 16),
+            Text(
+              'This is taking longer than usual. Make sure Smarty is on and close to your phone.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: _secondaryTextColor),
+            ),
+            SizedBox(height: 8),
+            Center(
+              child: _buildTextAction(
+                'Check again',
+                () => unawaited(_refreshStatus()),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -565,9 +708,8 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       iconColor: Colors.blue.shade400,
       heading: 'Bluetooth is off',
       body: 'Turn on Bluetooth on your phone to reach Smarty',
-      hint: isIOS
-          ? 'Swipe down from the top-right corner and tap the Bluetooth icon.'
-          : null,
+      // iOS: "Open Settings" can only open this app's page in Settings.
+      hint: isIOS ? bluetoothOffHintIOS : null,
       toyCardSubtitle: 'Bluetooth is off on this phone',
       actions: [
         _buildPrimaryButton(
@@ -599,8 +741,28 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   // Deliberately does NOT say the toy is off: a short look that sees nothing
   // can't tell off from out of reach (or busy with another phone). A
-  // background connect is already waiting, so no action is required.
+  // background connect is already waiting, so no action is required. If the
+  // look DID just see the toy (the connect hasn't happened yet, or failed and
+  // will be retried), say it's on and connecting instead.
   Widget _buildNotNearbyView() {
+    if (_bleManager.savedToySeenRecently) {
+      return _buildMessageView(
+        icon: Icons.bluetooth_searching,
+        iconColor: Colors.blue.shade400,
+        heading: 'Smarty is on — connecting…',
+        body: "Keep it close to your phone. It'll connect by itself.",
+        toyCardSubtitle: 'On — connecting…',
+        actions: [
+          _buildPrimaryButton(
+            label: 'Check again',
+            icon: Icons.refresh,
+            onPressed: () => unawaited(_bleManager.watchSavedToy()),
+          ),
+          SizedBox(height: 12),
+          _buildTextAction('Set up a different Smarty', _openConnectionPage),
+        ],
+      );
+    }
     return _buildMessageView(
       icon: Icons.bedtime_outlined,
       iconColor: Colors.indigo.shade300,
@@ -624,12 +786,12 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     return _buildMessageView(
       icon: Icons.link_off,
       iconColor: Colors.orange.shade400,
-      heading: 'Your phone remembers an old connection to Smarty.',
-      body: pairingBrokenSteps(isIOS: isIOS),
+      heading: pairingBrokenHeading,
+      bodySteps: pairingBrokenStepList(isIOS: isIOS),
       toyCardSubtitle: 'Needs reconnecting',
       actions: [
         // Opens setup, not just another quick look: after the button hold
-        // the toy only waits 30 seconds, and the setup page keeps looking
+        // the toy only waits a couple of minutes, and the setup page keeps looking
         // (with the same instructions) for as long as it's open.
         _buildPrimaryButton(
           label: 'Try again',
@@ -648,42 +810,49 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   Widget _buildConnectedView() {
-    final bool needsLinkStep = DevConfig.linkingEnabled &&
+    final bool needsLinkStep =
+        DevConfig.linkingEnabled &&
         !_waitingForStatus &&
         _bleManager.registered == false;
 
-    return RefreshIndicator(
-      onRefresh: _refreshStatus,
-      child: SingleChildScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildToyCard(
-              subtitle: toyStatusLine(
-                _bleManager,
-                statusStalled: _wifiStatusStalled,
-              ),
-              busy: _waitingForStatus && !_wifiStatusStalled,
+    return _pullToRefresh(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildToyCard(
+            subtitle: toyStatusLine(
+              _bleManager,
+              statusStalled: _wifiStatusStalled,
             ),
-            if (needsLinkStep) ...[
-              SizedBox(height: 16),
-              Center(
-                child: _buildPrimaryButton(
-                  label: 'Finish setup',
-                  icon: Icons.check_circle_outline,
-                  onPressed: _openConnectionPage,
-                ),
+            // No spinner once the advert has already told us "not on
+            // Wi-Fi", nor during a pull (its own spinner shows).
+            busy: homeToyCardBusy(
+              phase: ToyPhase.connected,
+              waitingForStatus: _waitingForStatus,
+              statusStalled: _wifiStatusStalled,
+              advertSaysNoWifi:
+                  _bleManager.savedToySeenRecently &&
+                  _bleManager.lastSeenAdvert?.wifiUp == false,
+              pullRefreshing: _pullRefreshing,
+            ),
+          ),
+          if (needsLinkStep) ...[
+            SizedBox(height: 16),
+            Center(
+              child: _buildPrimaryButton(
+                label: 'Finish setup',
+                icon: Icons.check_circle_outline,
+                onPressed: _openConnectionPage,
               ),
-            ],
-            SizedBox(height: 20),
-            _buildWifiStatusCard(),
-            // NOTE: battery status card intentionally omitted — the device has no
-            // battery sensing yet (firmware returns a fixed placeholder), so showing
-            // a precise "%" would mislead parents (APP-7 / FW-21). Restore this card
-            // once real battery telemetry exists.
+            ),
           ],
-        ),
+          SizedBox(height: 20),
+          _buildWifiStatusCard(),
+          // NOTE: battery status card intentionally omitted — the device has no
+          // battery sensing yet (firmware returns a fixed placeholder), so showing
+          // a precise "%" would mislead parents (APP-7 / FW-21). Restore this card
+          // once real battery telemetry exists.
+        ],
       ),
     );
   }
@@ -704,7 +873,8 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
           tooltip: 'Refresh',
           onPressed: () {
             setState(() {
-              _wifiStatusStalled = false; // show the spinner again while we retry
+              _wifiStatusStalled =
+                  false; // show the spinner again while we retry
             });
             _refreshStatus();
           },
@@ -712,21 +882,30 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       );
     }
 
+    // During a pull the cards keep their text but not their spinners.
     if (_waitingForStatus) {
       return _buildStatusCard(
-        icon: null,
+        icon: Icons.wifi_find,
         color: Colors.orange,
         title: 'Checking Wi-Fi…',
-        isLoading: true,
+        isLoading: !_pullRefreshing,
       );
     }
 
     if (wifi == 'Initializing' || wifi == 'Reconnecting') {
+      // Joining can legitimately take a while (the toy retries for ~45 s),
+      // and BleManager keeps re-reading meanwhile — but never leave a bare
+      // spinner: offer a manual re-check too.
       return _buildStatusCard(
-        icon: null,
+        icon: Icons.wifi_find,
         color: Colors.blue,
         title: 'Joining Wi-Fi…',
-        isLoading: true,
+        isLoading: !_pullRefreshing,
+        trailing: IconButton(
+          icon: Icon(Icons.refresh, color: Colors.blue.shade700),
+          tooltip: 'Check again',
+          onPressed: () => unawaited(_refreshStatus()),
+        ),
       );
     }
 
@@ -742,9 +921,12 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     return _buildStatusCard(
       icon: Icons.wifi_off,
       color: Colors.orange,
-      title: wifi == 'Auth Failed'
-          ? 'Wi-Fi password may have changed'
-          : 'Wi-Fi: Not connected',
+      title: switch (wifi) {
+        'Auth Failed' => 'Wi-Fi password may have changed',
+        'Connection Failed' => "Can't reach Wi-Fi",
+        'No credentials' => 'Wi-Fi not set up yet',
+        _ => 'Wi-Fi: Not connected',
+      },
       isLoading: false,
       trailing: TextButton(
         onPressed: _openWifiSetup,
@@ -773,9 +955,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Theme.of(context).brightness == Brightness.dark
-                ? Colors.black26
-                : Colors.grey.shade200,
+            color:
+                Theme.of(context).brightness == Brightness.dark
+                    ? Colors.black26
+                    : Colors.grey.shade200,
             blurRadius: 6,
             offset: Offset(0, 2),
           ),
@@ -785,13 +968,13 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         children: [
           isLoading
               ? SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(color),
-                  ),
-                )
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(color),
+                ),
+              )
               : Icon(icon, color: color, size: 20),
           SizedBox(width: 12),
           Expanded(
@@ -819,6 +1002,46 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
           _animationController.reset();
         });
       },
+    );
+  }
+}
+
+/// Pull-to-refresh that works from anywhere on the screen, not just on the
+/// content: the scroll area always fills the available height (so a drag in
+/// the empty space below short content still pulls) and can always scroll
+/// (so a pull works even when nothing overflows). [padding] sits inside the
+/// scroll area, so the pull reaches right up to the edges. [child] is at
+/// least the padded screen height tall, so a Column inside can still center
+/// or spread its content.
+class PullToRefreshArea extends StatelessWidget {
+  const PullToRefreshArea({
+    super.key,
+    required this.onRefresh,
+    required this.child,
+    this.padding = EdgeInsets.zero,
+  });
+
+  final RefreshCallback onRefresh;
+  final EdgeInsets padding;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder:
+          (context, constraints) => RefreshIndicator(
+            onRefresh: onRefresh,
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: padding,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: max(0, constraints.maxHeight - padding.vertical),
+                ),
+                child: child,
+              ),
+            ),
+          ),
     );
   }
 }
@@ -882,10 +1105,9 @@ class SetupSuccessView extends StatelessWidget {
                 'Your Smarty is ready.',
                 style: TextStyle(
                   fontSize: 16,
-                  color: Theme.of(context)
-                      .colorScheme
-                      .onSurface
-                      .withValues(alpha: 0.7),
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.onSurface.withValues(alpha: 0.7),
                 ),
               ),
               SizedBox(height: 24),
@@ -925,9 +1147,7 @@ class SetupSuccessView extends StatelessWidget {
                 final double value = animation.value;
                 // Hidden before the burst starts and once it has finished.
                 return value > 0 && value < 1.0
-                    ? CustomPaint(
-                        painter: ConfettiPainter(progress: value),
-                      )
+                    ? CustomPaint(painter: ConfettiPainter(progress: value))
                     : SizedBox.shrink();
               },
             ),
@@ -972,14 +1192,17 @@ class ConfettiPainter extends CustomPainter {
 
     for (final p in _particles) {
       final x = p.x * size.width;
-      final y = size.height * (0.3 + 0.7 * progress) - p.fall * size.height * progress;
+      final y =
+          size.height * (0.3 + 0.7 * progress) -
+          p.fall * size.height * progress;
       paint.color = p.color;
       canvas.drawCircle(Offset(x, y), p.size / 2, paint);
     }
   }
 
   @override
-  bool shouldRepaint(ConfettiPainter oldDelegate) => oldDelegate.progress != progress;
+  bool shouldRepaint(ConfettiPainter oldDelegate) =>
+      oldDelegate.progress != progress;
 }
 
 class _ConfettiParticle {
@@ -1000,13 +1223,18 @@ class AnimatedScaleButton extends StatefulWidget {
   final VoidCallback onPressed;
   final Widget child;
 
-  const AnimatedScaleButton({required this.onPressed, required this.child, super.key});
+  const AnimatedScaleButton({
+    required this.onPressed,
+    required this.child,
+    super.key,
+  });
 
   @override
   State<AnimatedScaleButton> createState() => _AnimatedScaleButtonState();
 }
 
-class _AnimatedScaleButtonState extends State<AnimatedScaleButton> with SingleTickerProviderStateMixin {
+class _AnimatedScaleButtonState extends State<AnimatedScaleButton>
+    with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   late Animation<double> _scaleAnimation;
 
@@ -1017,9 +1245,10 @@ class _AnimatedScaleButtonState extends State<AnimatedScaleButton> with SingleTi
       vsync: this,
       duration: Duration(milliseconds: 100),
     );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.95).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
+    _scaleAnimation = Tween<double>(
+      begin: 1.0,
+      end: 0.95,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
   }
 
   @override

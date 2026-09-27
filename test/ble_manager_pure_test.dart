@@ -104,6 +104,73 @@ void main() {
     });
   });
 
+  group('ToyStatus.parse', () {
+    test('legacy read value "BAT:90,WIFI:Wifi0460"', () {
+      final st = ToyStatus.parse('BAT:90,WIFI:Wifi0460')!;
+      expect(st.wifi, 'Wifi0460');
+      expect(st.battery, 90);
+      expect(st.registered, isNull);
+      expect(BleManager.isWifiConnectedStatus(st.wifi!), isTrue);
+    });
+
+    test('legacy value with a status token', () {
+      expect(ToyStatus.parse('BAT:0,WIFI:Unknown')!.wifi, 'Unknown');
+      expect(ToyStatus.parse('BAT:90,WIFI:No credentials')!.wifi,
+          'No credentials');
+      expect(ToyStatus.parse('BAT:90,WIFI:Auth Failed')!.wifi, 'Auth Failed');
+    });
+
+    test('legacy value: the network name runs to the end', () {
+      final st = ToyStatus.parse('BAT:75,WIFI:Cafe: 2,4 GHz')!;
+      expect(st.wifi, 'Cafe: 2,4 GHz');
+      expect(st.battery, 75);
+    });
+
+    test('legacy value in the other order', () {
+      final st = ToyStatus.parse('WIFI:HomeNet,BAT:42')!;
+      expect(st.wifi, 'HomeNet');
+      expect(st.battery, 42);
+    });
+
+    test('JSON (notification, and reads on new firmware)', () {
+      final st = ToyStatus.parse('{"version":"1.0","battery":90,'
+          '"wifi":"Wifi0460","registered":false,'
+          '"system":{"device_name":"Smarty-1A2B"}}')!;
+      expect(st.wifi, 'Wifi0460');
+      expect(st.battery, 90);
+      expect(st.registered, isFalse);
+    });
+
+    test('JSON with a token, a double / string battery, no registered', () {
+      final a = ToyStatus.parse('{"battery":88.0,"wifi":"Initializing"}')!;
+      expect(a.wifi, 'Initializing');
+      expect(a.battery, 88);
+      expect(a.registered, isNull);
+      expect(ToyStatus.parse('{"battery":"77%","wifi":"x"}')!.battery, 77);
+    });
+
+    test('the "{}" placeholder carries nothing', () {
+      final st = ToyStatus.parse('{}')!;
+      expect(st.wifi, isNull);
+      expect(st.battery, isNull);
+      expect(st.registered, isNull);
+    });
+
+    test('broken JSON is ignored, never taken for a network name', () {
+      expect(ToyStatus.parse('{"version":"1.0","battery":90,"wi'), isNull);
+      expect(ToyStatus.parse('[1,2]'), isNull);
+      expect(ToyStatus.parse(''), isNull);
+      expect(ToyStatus.parse('   '), isNull);
+    });
+
+    test('oldest "name,level" format', () {
+      final st = ToyStatus.parse('HomeNet,55')!;
+      expect(st.wifi, 'HomeNet');
+      expect(st.battery, 55);
+      expect(ToyStatus.parse('HomeNet')!.battery, isNull);
+    });
+  });
+
   group('isWifiConnectedStatus', () {
     test('status tokens are not a network', () {
       for (final s in [
@@ -122,6 +189,113 @@ void main() {
 
     test('a real network name is connected', () {
       expect(BleManager.isWifiConnectedStatus('HomeNet'), isTrue);
+    });
+  });
+
+  group('ToyAdvert.fromScanResult', () {
+    ScanResult scan(Map<Guid, List<int>> serviceData) => ScanResult(
+          device: BluetoothDevice.fromId('AA:BB:CC:DD:EE:FF'),
+          advertisementData: AdvertisementData(
+            advName: 'Smarty-AB12',
+            txPowerLevel: null,
+            appearance: null,
+            connectable: true,
+            manufacturerData: const {},
+            serviceData: serviceData,
+            serviceUuids: [Guid('abcd')],
+          ),
+          rssi: -50,
+          timeStamp: DateTime(2026, 9, 26),
+        );
+
+    test('no service data (old firmware) → null', () {
+      expect(ToyAdvert.fromScanResult(scan(const {})), isNull);
+    });
+
+    test('[0x03, 0x01] → pairing, on Wi-Fi, not registered, version 1', () {
+      final a = ToyAdvert.fromScanResult(scan({
+        Guid('abcd'): [0x03, 0x01],
+      }))!;
+      expect(a.pairing, isTrue);
+      expect(a.wifiUp, isTrue);
+      expect(a.registered, isFalse);
+      expect(a.version, 1);
+      expect(a.isLegacy, isFalse);
+    });
+
+    test('the 128-bit base form of 0xABCD is the same key', () {
+      expect(Guid('0000abcd-0000-1000-8000-00805f9b34fb'), Guid('abcd'));
+      final a = ToyAdvert.fromScanResult(scan({
+        Guid('0000abcd-0000-1000-8000-00805f9b34fb'): [0x04, 0x01],
+      }))!;
+      expect(a, const ToyAdvert(
+          pairing: false, wifiUp: false, registered: true, version: 1));
+    });
+
+    test('[0x00, 0x00] → nothing set, version 0 (legacy)', () {
+      final a = ToyAdvert.fromScanResult(scan({
+        Guid('abcd'): [0x00, 0x00],
+      }))!;
+      expect(a.pairing, isFalse);
+      expect(a.wifiUp, isFalse);
+      expect(a.registered, isFalse);
+      expect(a.version, 0);
+      expect(a.isLegacy, isTrue);
+    });
+
+    test('a single flags byte means version 0', () {
+      final a = ToyAdvert.fromScanResult(scan({
+        Guid('abcd'): [0x01],
+      }))!;
+      expect(a.pairing, isTrue);
+      expect(a.version, 0);
+    });
+
+    test('reserved bits 3–7 are ignored', () {
+      final a = ToyAdvert.fromScanResult(scan({
+        Guid('abcd'): [0xF9, 0x01], // 1111 1001
+      }))!;
+      expect(a, const ToyAdvert(
+          pairing: true, wifiUp: false, registered: false, version: 1));
+    });
+
+    test('service data under another UUID is ignored', () {
+      expect(
+          ToyAdvert.fromScanResult(scan({
+            Guid('180f'): [0x03, 0x01],
+          })),
+          isNull);
+      final a = ToyAdvert.fromScanResult(scan({
+        Guid('180f'): [0x00, 0x00],
+        Guid('abcd'): [0x02, 0x01],
+      }))!;
+      expect(a.pairing, isFalse);
+      expect(a.wifiUp, isTrue);
+    });
+
+    test('empty data under 0xABCD counts as none', () {
+      expect(ToyAdvert.fromScanResult(scan({Guid('abcd'): <int>[]})), isNull);
+    });
+  });
+
+  group('BleManager.profileMaxBytesFor', () {
+    test('no advert data → 500', () {
+      expect(BleManager.profileMaxBytesFor(null), 500);
+      expect(BleManager.profileMaxBytesFor(null),
+          BleManager.userContextMaxBytesLegacy);
+    });
+
+    test('version 0 → 500', () {
+      expect(BleManager.profileMaxBytesFor(const ToyAdvert(pairing: true)),
+          500);
+    });
+
+    test('version 1 (and later) → 1024', () {
+      expect(
+          BleManager.profileMaxBytesFor(
+              const ToyAdvert(pairing: true, version: 1)),
+          1024);
+      expect(BleManager.profileMaxBytesFor(const ToyAdvert(version: 2)), 1024);
     });
   });
 }

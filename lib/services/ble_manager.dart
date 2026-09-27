@@ -102,6 +102,291 @@ class ConnectException implements Exception {
   String toString() => 'ConnectException(${kind.name}): $cause';
 }
 
+/// What one link drop means for the stale-pairing check. See
+/// [LinkDropTracker.linkDown].
+enum LinkDropVerdict {
+  /// We dropped the link ourselves (disconnect(), cancel, adapter going off).
+  /// Doesn't count either way.
+  intentional,
+
+  /// The link had been up long enough: an ordinary drop (toy switched off,
+  /// walked away). Breaks any quick-drop streak.
+  normal,
+
+  /// Dropped within [LinkDropTracker.quickWindow] of coming up, but not (yet)
+  /// often enough to call the pairing broken.
+  quick,
+
+  /// The drop's own reason says the toy rejected our keys (iOS CBError 14
+  /// "Peer removed pairing information", Android HCI 0x05/0x06/0x3D …).
+  pairingReason,
+
+  /// [LinkDropTracker.threshold] quick drops in a row — the signature of a toy
+  /// that no longer knows this phone (iOS connects, fails to encrypt and hangs
+  /// up ~0.4 s later, often without a telling reason).
+  repeatedQuickDrops,
+}
+
+/// Pure bookkeeping for the "connected, then dropped almost at once" signature
+/// of a stale pairing. One instance follows one toy's link; every up/down is
+/// reported here from whichever code path sees it first, so each link is
+/// counted exactly once ([linkDown] is idempotent until the next [linkUp]).
+///
+/// The streak survives failed attempts, re-arms and backoff (it is only
+/// broken by a link that stayed up past [quickWindow], or by [reset]), so the
+/// second quick drop in a row is always recognised — whichever path the drop
+/// happened in (pending connect, mid-initialize, after connected).
+class LinkDropTracker {
+  LinkDropTracker({
+    this.quickWindow = const Duration(seconds: 4),
+    this.threshold = 2,
+  });
+
+  /// A drop sooner than this after link-up counts as quick.
+  final Duration quickWindow;
+
+  /// Quick drops in a row that mean "pairing broken".
+  final int threshold;
+
+  bool _up = false;
+  DateTime? _upAt;
+  int _quickDrops = 0;
+
+  /// Whether a link is currently recorded as up.
+  bool get isUp => _up;
+
+  /// Quick drops in the current streak.
+  int get quickDrops => _quickDrops;
+
+  /// The link came up at [now]. A second call for the same link is ignored
+  /// (keeps the first, earliest time).
+  void linkUp(DateTime now) {
+    if (_up) return;
+    _up = true;
+    _upAt = now;
+  }
+
+  /// The link went down at [now]. Returns null when no link was recorded as
+  /// up (already counted, or it never came up — e.g. a failed direct
+  /// connect, which is classified from its error instead).
+  ///
+  /// [intentional] (we dropped it) leaves the streak unchanged;
+  /// [pairingReason] decides at once. A [repeatedQuickDrops] or
+  /// [pairingReason] verdict resets the streak.
+  LinkDropVerdict? linkDown(
+    DateTime now, {
+    bool pairingReason = false,
+    bool intentional = false,
+  }) {
+    if (!_up) return null;
+    final DateTime? upAt = _upAt;
+    _up = false;
+    _upAt = null;
+    if (intentional) return LinkDropVerdict.intentional;
+    if (pairingReason) {
+      _quickDrops = 0;
+      return LinkDropVerdict.pairingReason;
+    }
+    if (upAt == null || now.difference(upAt) > quickWindow) {
+      _quickDrops = 0; // a link that held breaks the streak
+      return LinkDropVerdict.normal;
+    }
+    _quickDrops++;
+    if (_quickDrops >= threshold) {
+      _quickDrops = 0;
+      return LinkDropVerdict.repeatedQuickDrops;
+    }
+    return LinkDropVerdict.quick;
+  }
+
+  /// A connect attempt failed before any link was up (iOS reports a failed
+  /// encryption with stale keys as didFailToConnectPeripheral — the app
+  /// never sees "connected"). Counts like a quick drop; [pairingReason]
+  /// decides at once. Callers must report each failed attempt once, and only
+  /// failures that can mean a stale pairing (not routine ones such as
+  /// Android's GATT 133).
+  LinkDropVerdict linkFailed({bool pairingReason = false}) {
+    _up = false;
+    _upAt = null;
+    if (pairingReason) {
+      _quickDrops = 0;
+      return LinkDropVerdict.pairingReason;
+    }
+    _quickDrops++;
+    if (_quickDrops >= threshold) {
+      _quickDrops = 0;
+      return LinkDropVerdict.repeatedQuickDrops;
+    }
+    return LinkDropVerdict.quick;
+  }
+
+  /// Forget everything (pairing repaired / toy forgotten / signed out).
+  void reset() {
+    _up = false;
+    _upAt = null;
+    _quickDrops = 0;
+  }
+}
+
+/// What a toy says about itself in its advertisement, before any connection:
+/// Service Data under the Smarty service UUID 0xABCD, 2 bytes `[flags, ver]`
+/// (bt_setup.c adv data).
+///
+/// - `flags` bit0 = pairing mode (waiting for a phone), bit1 = on Wi-Fi,
+///   bit2 = registered (holds its backend secret). Bits 3–7 reserved.
+/// - `ver` = 1: the profile attribute (ab03) holds 1024 bytes. Absent / 0:
+///   older firmware, 500 bytes.
+///
+/// Firmware from before this marker advertises no service data at all —
+/// [fromScanResult] then returns null and callers treat the toy as before.
+/// Pure and immutable, so it can be unit-tested with hand-made scan results.
+@immutable
+class ToyAdvert {
+  /// Toy is in pairing mode (waiting for a phone). null = not reported.
+  final bool? pairing;
+
+  /// Toy is on Wi-Fi. null = not reported.
+  final bool? wifiUp;
+
+  /// Toy holds its backend secret. null = not reported.
+  final bool? registered;
+
+  /// Advert format version (`ver` byte); 0 when absent.
+  final int version;
+
+  const ToyAdvert({
+    this.pairing,
+    this.wifiUp,
+    this.registered,
+    this.version = 0,
+  });
+
+  /// Service data present but no (or a zero) version byte.
+  bool get isLegacy => version == 0;
+
+  /// Parse the 0xABCD service data out of a scan result, or null when the
+  /// toy sent none (old firmware).
+  static ToyAdvert? fromScanResult(ScanResult r) =>
+      fromServiceData(r.advertisementData.serviceData);
+
+  /// [fromScanResult] on a raw service-data map. FBP keys it by [Guid], and
+  /// `Guid("abcd")` equals the 128-bit base form
+  /// `0000abcd-0000-1000-8000-00805f9b34fb`, so either spelling from the
+  /// platform matches. Other UUIDs are ignored; empty data counts as none.
+  static ToyAdvert? fromServiceData(Map<Guid, List<int>> serviceData) {
+    final List<int>? data = serviceData[BleManager.smartyServiceGuid];
+    if (data == null || data.isEmpty) return null;
+    final int flags = data[0] & 0xFF;
+    final int version = data.length >= 2 ? data[1] & 0xFF : 0;
+    return ToyAdvert(
+      pairing: flags & 0x01 != 0,
+      wifiUp: flags & 0x02 != 0,
+      registered: flags & 0x04 != 0,
+      version: version,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is ToyAdvert &&
+      other.pairing == pairing &&
+      other.wifiUp == wifiUp &&
+      other.registered == registered &&
+      other.version == version;
+
+  @override
+  int get hashCode => Object.hash(pairing, wifiUp, registered, version);
+
+  @override
+  String toString() => 'ToyAdvert(pairing: $pairing, wifiUp: $wifiUp, '
+      'registered: $registered, version: $version)';
+}
+
+/// One status report from the toy (ab04), whatever format it came in. Each
+/// field is null when the report didn't include it. Pure and immutable — see
+/// [ToyStatus.parse].
+@immutable
+class ToyStatus {
+  /// Raw `wifi` value: a network name, or a status token such as
+  /// "Initializing" / "No credentials" / "Auth Failed" (wifi_config.c).
+  final String? wifi;
+  final int? battery;
+
+  /// Whether the toy holds its backend secret (JSON only).
+  final bool? registered;
+
+  const ToyStatus({this.wifi, this.battery, this.registered});
+
+  /// Parse a status value. Formats the firmware has used:
+  ///  - JSON (notifications, and reads since 2026-09):
+  ///    `{"version":"1.0","battery":90,"wifi":"HomeNet","registered":false,…}`
+  ///  - legacy key-value (reads on older firmware): `BAT:90,WIFI:HomeNet` —
+  ///    WIFI is written last, so it runs to the end (a name may contain `,`
+  ///    or `:`);
+  ///  - oldest: `HomeNet,90`.
+  /// Returns null for something unusable — including JSON-looking text that
+  /// doesn't parse (e.g. cut short), which must never be taken for a
+  /// network name.
+  static ToyStatus? parse(String raw) {
+    final String text = raw.trim();
+    if (text.isEmpty) return null;
+
+    if (text.startsWith('{') || text.startsWith('[')) {
+      final Object? decoded;
+      try {
+        decoded = jsonDecode(text);
+      } catch (_) {
+        return null;
+      }
+      if (decoded is! Map) return null;
+      final Object? wifi = decoded['wifi'];
+      final Object? reg = decoded['registered'];
+      return ToyStatus(
+        wifi: wifi?.toString(),
+        battery: _batteryFrom(decoded['battery']),
+        registered: reg is bool ? reg : null,
+      );
+    }
+
+    final int wifiAt = text.indexOf('WIFI:');
+    final int batAt = text.indexOf('BAT:');
+    if (wifiAt >= 0 || batAt >= 0) {
+      String? wifi;
+      if (wifiAt >= 0) {
+        String rest = text.substring(wifiAt + 'WIFI:'.length);
+        // Tolerate the other order too ("WIFI:x,BAT:90").
+        final int batAfter = rest.lastIndexOf(',BAT:');
+        if (batAt > wifiAt && batAfter >= 0) rest = rest.substring(0, batAfter);
+        wifi = rest.trim();
+      }
+      int? battery;
+      if (batAt >= 0) {
+        final m = RegExp(r'^BAT:\s*(\d+)').firstMatch(text.substring(batAt));
+        if (m != null) battery = int.tryParse(m.group(1)!);
+      }
+      return ToyStatus(wifi: wifi, battery: battery);
+    }
+
+    final List<String> parts = text.split(',');
+    return ToyStatus(
+      wifi: parts.first.trim(),
+      battery: parts.length >= 2 ? int.tryParse(parts[1].trim()) : null,
+    );
+  }
+
+  static int? _batteryFrom(Object? v) {
+    if (v is int) return v;
+    if (v is double) return v.toInt();
+    if (v == null) return null;
+    final digits = v.toString().replaceAll(RegExp(r'[^0-9]'), '');
+    return digits.isEmpty ? null : int.tryParse(digits);
+  }
+
+  @override
+  String toString() =>
+      'ToyStatus(wifi: $wifi, battery: $battery, registered: $registered)';
+}
+
 // A singleton class to manage BLE connections and data
 class BleManager {
   // Legacy device-global persistence keys (pre per-user scoping). Kept only for
@@ -120,6 +405,10 @@ class BleManager {
   // by the toy's own id (ab06). Same key the setup page has always written.
   static String _registeredRecordKey(String toyDeviceId) =>
       'device_registered_$toyDeviceId';
+  // Advert format version last seen for a toy, keyed by its BLE id, so the
+  // profile size limit is known while it is connected (a connected toy
+  // doesn't advertise). See [userContextMaxBytes].
+  static String _advVersionKeyFor(String toyId) => 'toy_adv_ver_$toyId';
 
   // Current Firebase uid, or null when signed out. Firebase.initializeApp is
   // awaited in main() before runApp, so this is safe to read on demand.
@@ -178,7 +467,7 @@ class BleManager {
   // forgetToy()). While it matches the toy being watched, "not seen" stays
   // [ToyPhase.pairingBroken] instead of [ToyPhase.notNearby], and no
   // background autoConnect is armed: after the parent resets the toy its
-  // bonds are gone, and once its 30-second pairing window closes it neither
+  // bonds are gone, and once its pairing window closes it neither
   // advertises nor accepts stale keys — "it'll connect by itself" would be a
   // dead end. Kept per toy id (not a bare bool) so it survives a sign-out /
   // sign-in of the same toy but never leaks onto another account's toy.
@@ -207,10 +496,33 @@ class BleManager {
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
   bool _waitingForAdapter = false;
 
-  // Quick-drop heuristic for a stale pairing (see _registerQuickDrop).
-  DateTime? _linkUpAt;
-  int _quickDrops = 0;
-  Timer? _stableLinkTimer;
+  // Stale-pairing detection (see [LinkDropTracker] and _watchLink): one
+  // tracker for the toy we are connecting to / waiting for, fed by a
+  // connection-state listener that lives across attempts, so a drop that
+  // happens mid-initialize (before _monitorDeviceConnection is attached) or
+  // right after a pending connect is counted too — and its reason is read
+  // at the moment of the drop, before an OS auto-reconnect replaces it
+  // (FBP's disconnectReason is simply the latest state event).
+  final LinkDropTracker _drops = LinkDropTracker();
+  String? _dropsToyId;
+  BluetoothDevice? _linkWatchDevice;
+  StreamSubscription<BluetoothConnectionState>? _linkWatchSub;
+  // remoteId -> number of disconnect() calls of ours in flight: the drops
+  // they cause are ours, not the toy's.
+  final Map<String, int> _ownDisconnects = {};
+
+  // Status keep-alive (see _scheduleStatusPoll).
+  Timer? _statusPollTimer;
+  int _statusPollsLeft = 0;
+
+  /// While connected and the toy's last status is transitional ("Unknown",
+  /// "Initializing", "Reconnecting" …), the status is re-read this often, so
+  /// the UI never depends on a single notification to leave "Checking…" /
+  /// "Joining Wi-Fi…".
+  static const Duration statusPollInterval = Duration(seconds: 5);
+
+  /// Upper bound on keep-alive reads per transitional stretch (~3 min).
+  static const int statusPollMaxReads = 36;
 
   // Cached saved toy for the signed-in account (null = none / not loaded).
   String? _savedToyId;
@@ -245,14 +557,104 @@ class BleManager {
     return m?.group(1)?.toUpperCase();
   }
 
-  /// Largest value the firmware stores per characteristic (CHAR_VAL_LEN_MAX in
-  /// bt_setup.c). Writes above the MTU go out as BLE long (prepared) writes,
-  /// which the firmware supports, so this is the real limit for user context.
-  static const int userContextMaxBytes = 500;
+  /// Profile (ab03) size on firmware that advertises no version
+  /// (CHAR_VAL_LEN_MAX = 500 in older bt_setup.c).
+  static const int userContextMaxBytesLegacy = 500;
+
+  /// Profile (ab03) size on firmware whose advert carries `ver` >= 1.
+  static const int userContextMaxBytesV1 = 1024;
+
+  /// Profile size a toy with [advert] accepts: [userContextMaxBytesV1] when
+  /// its advert version is >= 1, otherwise [userContextMaxBytesLegacy]
+  /// (including no advert data at all). Pure.
+  static int profileMaxBytesFor(ToyAdvert? advert) =>
+      _profileMaxBytesForVersion(advert?.version ?? 0);
+
+  static int _profileMaxBytesForVersion(int version) => version >= 1
+      ? userContextMaxBytesV1
+      : userContextMaxBytesLegacy;
+
+  /// Largest profile the current (connected, else saved) toy stores, in UTF-8
+  /// bytes — from the advert version last seen for it (remembered per toy, so
+  /// it holds while connected). Unknown toy or old firmware: the legacy 500.
+  /// Writes above the MTU go out as BLE long (prepared) writes, which the
+  /// firmware supports, so this is the real limit for user context.
+  int get userContextMaxBytes {
+    final id = _currentToyId;
+    return _profileMaxBytesForVersion(
+        id == null ? 0 : (_advVersionByToy[id] ?? 0));
+  }
 
   /// Usable payload for a single acknowledged characteristic write, in UTF-8
   /// bytes. Long writes make this independent of the negotiated MTU.
   int get maxWritePayloadBytes => userContextMaxBytes;
+
+  // Advert version per toy BLE id (mirrors the `toy_adv_ver_<id>` prefs).
+  final Map<String, int> _advVersionByToy = {};
+
+  // Latest sighting of the saved toy by the launch/resume probe.
+  String? _lastSeenToyId;
+  ToyAdvert? _lastSeenAdvert;
+  DateTime? _lastSeenAt;
+
+  /// How long a probe sighting counts as "Smarty is on right now".
+  static const Duration recentSightingWindow = Duration(seconds: 20);
+
+  /// Advert data from the last time the probe saw this account's saved toy,
+  /// or null (not seen, or old firmware that sends none).
+  ToyAdvert? get lastSeenAdvert =>
+      _lastSeenToyId != null && _lastSeenToyId == _savedToyId
+          ? _lastSeenAdvert
+          : null;
+
+  /// When the probe last saw this account's saved toy advertising (any
+  /// firmware), or null.
+  DateTime? get lastSeenAt =>
+      _lastSeenToyId != null && _lastSeenToyId == _savedToyId
+          ? _lastSeenAt
+          : null;
+
+  /// The saved toy was seen advertising within [recentSightingWindow] — it
+  /// is on, even if the connect hasn't happened (yet).
+  bool get savedToySeenRecently {
+    final at = lastSeenAt;
+    return at != null &&
+        DateTime.now().difference(at) < recentSightingWindow;
+  }
+
+  // Probe saw the saved toy: remember when, what it advertised, and its
+  // advert version (for [userContextMaxBytes]).
+  void _recordSighting(ScanResult r) {
+    final id = r.device.remoteId.str;
+    final advert = ToyAdvert.fromScanResult(r);
+    _lastSeenToyId = id;
+    _lastSeenAdvert = advert;
+    _lastSeenAt = DateTime.now();
+    debugPrint("BleManager: saw saved toy — $advert");
+    rememberAdvertVersion(id, advert);
+  }
+
+  /// Record the advert version seen for [toyId] (0 for old firmware / no
+  /// advert data), in memory and in SharedPreferences, so
+  /// [userContextMaxBytes] is right once that toy is connected. Called by the
+  /// probe and by the setup page when the parent picks a toy.
+  void rememberAdvertVersion(String toyId, ToyAdvert? advert) {
+    final int version = advert?.version ?? 0;
+    if (_advVersionByToy[toyId] == version) return;
+    _advVersionByToy[toyId] = version;
+    SharedPreferences.getInstance()
+        .then((prefs) => prefs.setInt(_advVersionKeyFor(toyId), version))
+        .catchError((Object e) {
+      debugPrint("⚠️ BleManager: Couldn't persist advert version: $e");
+      return false;
+    });
+  }
+
+  void _loadAdvVersion(SharedPreferences prefs, String toyId) {
+    if (_advVersionByToy.containsKey(toyId)) return;
+    final int? v = prefs.getInt(_advVersionKeyFor(toyId));
+    if (v != null) _advVersionByToy[toyId] = v;
+  }
 
   // Cached services
   BluetoothService? _smartyService;
@@ -272,10 +674,14 @@ class BleManager {
   StreamSubscription<List<int>>? _statusNotificationSubscription;
 
   // Fires when the peripheral sends a GATT "Service Changed" indication
-  // (e.g. after a firmware reflash, or the post-bond Service Changed this
-  // device sends). Android caches services for bonded devices, so we must
-  // re-discover to pick up characteristics the cached table was missing.
+  // (e.g. after a firmware upgrade; older firmware also sent one right after
+  // every new bond). iOS then invalidates the toy's services — including our
+  // status subscription — and Android caches services for bonded devices, so
+  // we must re-discover and re-subscribe. See [_onServicesReset].
   StreamSubscription<void>? _servicesResetSubscription;
+  Timer? _servicesResetDebounce;
+  bool _servicesResetRunning = false;
+  bool _servicesResetAgain = false;
 
   // Status information
   String _connectedWifi = "Unknown";
@@ -481,12 +887,13 @@ class BleManager {
       // (unless it's somehow the live one) and don't touch shared state.
       if (_connectedDevice?.remoteId != device.remoteId) {
         try {
-          await device.disconnect();
+          await _disconnectOwn(device);
         } catch (_) {}
       }
       throw const ConnectException(ConnectFailure.cancelledByUser);
     }
-    _linkUpAt ??= DateTime.now();
+    _watchLink(device);
+    if (device.isConnected) _noteLinkUp(device);
     _setPhase(ToyPhase.connecting);
 
     // Switching toys: drop the previous toy's link first. Reset FIRST so its
@@ -497,7 +904,7 @@ class BleManager {
       debugPrint("BleManager: switching toys — disconnecting ${old.remoteId.str}");
       _resetConnectionState();
       try {
-        await old.disconnect();
+        await _disconnectOwn(old);
       } catch (e) {
         debugPrint("⚠️ BleManager: Disconnecting previous toy failed: $e");
       }
@@ -513,6 +920,13 @@ class BleManager {
     try {
       _connectedDevice = device;
       _connectedWifi = "Unknown";
+      // Listen for "services changed" BEFORE discovering: the toy's
+      // indication can arrive while discovery / the first subscribe (which
+      // triggers pairing) is still in flight, and a reset we didn't hear
+      // leaves the app with dead characteristics and no status updates.
+      _servicesResetSubscription?.cancel();
+      _servicesResetSubscription =
+          device.onServicesReset.listen((_) => _onServicesReset(device, gen));
       // Fresh link: registration is re-learned from this toy's status (or
       // its local record) — never carried over from before.
       _statusRegistered = null;
@@ -561,26 +975,12 @@ class BleManager {
       // background failure. Other errors stay non-fatal, as before — e.g. a
       // slow first-time pairing prompt must not abort setup.
       try {
-        await _statusCharacteristic!.setNotifyValue(true);
+        await _subscribeStatus(_statusCharacteristic!);
       } catch (e) {
         if (classifyConnectError(e) == ConnectFailure.pairingBroken) rethrow;
         debugPrint("⚠️ BleManager: Enabling status notifications failed (non-fatal): $e");
       }
       _setupStatusUpdates();
-
-      // Re-discover when the peripheral signals its GATT table changed. This
-      // device sends a Service Changed indication right after bonding — which
-      // arrives AFTER the discovery above — and again whenever the firmware is
-      // reflashed. Without this, a stale/incomplete cached table (e.g. missing
-      // the ab01 Wi-Fi scan characteristic) is never refreshed.
-      _servicesResetSubscription?.cancel();
-      _servicesResetSubscription = device.onServicesReset.listen((_) async {
-        debugPrint("🔄 BleManager: Service Changed received — re-discovering services");
-        final ok = await _discoverServices();
-        if (ok && _statusCharacteristic != null) {
-          _setupStatusUpdates();
-        }
-      });
 
       if (device.isDisconnected) {
         throw StateError('Link dropped during setup');
@@ -605,10 +1005,6 @@ class BleManager {
       _consecutiveFailures = 0;
       _repairToyId = null; // the pairing works again
       _rearmTimer?.cancel();
-      _stableLinkTimer?.cancel();
-      _stableLinkTimer = Timer(const Duration(seconds: 5), () {
-        if (_connectedDevice == device && device.isConnected) _quickDrops = 0;
-      });
       _setPhase(ToyPhase.connected);
 
       // First status read (notifications only carry changes). With the
@@ -617,9 +1013,13 @@ class BleManager {
       unawaited(DevConfig.linkingEnabled
           ? refreshRegistered().then((_) {})
           : readStatusUpdate());
+      // And keep re-reading while the status is still transitional: right
+      // after a toy reboot it reports "Initializing", and the screens must
+      // not hang on that if the Wi-Fi notification that follows is lost.
+      _startStatusPoll();
     } catch (e) {
       // Classify BEFORE our own disconnect overwrites the disconnect reason.
-      final ConnectException failure = e is ConnectException
+      ConnectException failure = e is ConnectException
           ? e
           : ConnectException(_classifyForDevice(e, device), e);
       debugPrint("❌ BleManager: initialize failed (${failure.kind.name}): $e");
@@ -629,9 +1029,16 @@ class BleManager {
       // _onConnectFailure re-arms it with backoff when appropriate.)
       _resetConnectionState();
       try {
-        await device.disconnect();
+        await _disconnectOwn(device);
       } catch (de) {
         debugPrint("⚠️ BleManager: Disconnect after failed initialize: $de");
+      }
+      // The link watcher may have judged the pairing broken meanwhile (its
+      // view of the drop can land after ours) — report it as such.
+      if (failure.kind != ConnectFailure.pairingBroken &&
+          failure.kind != ConnectFailure.cancelledByUser &&
+          _needsRepairFor(device)) {
+        failure = ConnectException(ConnectFailure.pairingBroken, e);
       }
       if (_armedDevice == device) {
         _pendingSub?.cancel();
@@ -642,6 +1049,67 @@ class BleManager {
         await _onConnectFailure(device, failure);
       }
       throw failure;
+    }
+  }
+
+  /// The toy said its GATT table changed (Service Changed). Debounced: iOS
+  /// can report it more than once in a row.
+  void _onServicesReset(BluetoothDevice device, int gen) {
+    debugPrint("🔄 BleManager: services reset by the toy — will re-discover");
+    _servicesResetDebounce?.cancel();
+    _servicesResetDebounce = Timer(const Duration(milliseconds: 400), () {
+      unawaited(_recoverFromServicesReset(device, gen));
+    });
+  }
+
+  /// Re-discover services, re-cache characteristics, re-enable status
+  /// notifications and re-read the status after a services reset. Only for
+  /// the same toy and session it was armed for; a reset that arrives while
+  /// this runs triggers one more pass.
+  Future<void> _recoverFromServicesReset(BluetoothDevice device, int gen) async {
+    bool stale() =>
+        gen != _sessionGen ||
+        _connectedDevice?.remoteId != device.remoteId ||
+        device.isDisconnected;
+    if (stale()) return;
+    if (_servicesResetRunning) {
+      _servicesResetAgain = true;
+      return;
+    }
+    _servicesResetRunning = true;
+    try {
+      do {
+        _servicesResetAgain = false;
+        // Let an initialize() that is still running finish first (it does
+        // its own discovery); then redo the parts the reset invalidated.
+        final inFlight = _initializeFuture;
+        if (inFlight != null) {
+          try {
+            await inFlight;
+          } catch (_) {}
+        }
+        if (stale()) return;
+
+        final bool ok = await _discoverServices();
+        if (stale()) return;
+        if (!ok || _statusCharacteristic == null) {
+          debugPrint("⚠️ BleManager: re-discovery after services reset found no status characteristic");
+          continue;
+        }
+        // Always re-subscribe: FBP's isNotifying reads a cached CCCD value
+        // that survives the reset, but iOS dropped the subscription.
+        try {
+          await _subscribeStatus(_statusCharacteristic!);
+        } catch (e) {
+          debugPrint("⚠️ BleManager: re-enabling status notifications after services reset failed: $e");
+        }
+        if (stale()) return;
+        _setupStatusUpdates();
+        await readStatusUpdate();
+        debugPrint("✅ BleManager: recovered from services reset");
+      } while (_servicesResetAgain && !stale());
+    } finally {
+      _servicesResetRunning = false;
     }
   }
 
@@ -686,8 +1154,11 @@ class BleManager {
     _statusNotificationSubscription = null;
     _servicesResetSubscription?.cancel();
     _servicesResetSubscription = null;
-    _stableLinkTimer?.cancel();
-    _stableLinkTimer = null;
+    _servicesResetDebounce?.cancel();
+    _servicesResetDebounce = null;
+    _statusPollTimer?.cancel();
+    _statusPollTimer = null;
+    _statusPollsLeft = 0;
     _smartyService = null;
     _statusCharacteristic = null;
     _wifiScanCharacteristic = null;
@@ -874,7 +1345,7 @@ class BleManager {
       // Check if notifications are already set up
       if (!_statusCharacteristic!.isNotifying) {
         // Enable notifications
-        await _statusCharacteristic!.setNotifyValue(true);
+        await _subscribeStatus(_statusCharacteristic!);
         // debugPrint("✅ BleManager: Status notifications set up");
       }
       return true;
@@ -884,137 +1355,107 @@ class BleManager {
     }
   }
   
-  // Helper method to process status data
+  /// Status values that are not a settled answer yet: nothing heard, the
+  /// link just dropped, or the toy is (re)joining Wi-Fi. While the toy's last
+  /// status is one of these, [BleManager] keeps re-reading it. Pure.
+  static bool isStatusTransitional(String wifi) {
+    final String s = wifi.trim();
+    return s.isEmpty ||
+        s == 'Unknown' ||
+        s == 'NotConnected' ||
+        s == 'Initializing' ||
+        s == 'Reconnecting';
+  }
+
+  // Enable status notifications with a bounded wait. If the platform never
+  // answers (FBP timeout) — seen on iOS when CoreBluetooth believes the
+  // characteristic is already subscribed and so writes nothing, while the
+  // freshly booted toy has notifications off (bt_setup.c only notifies after
+  // a CCCD write on the current link) — force a real CCCD write by turning it
+  // off and on again. Other errors propagate for the caller to classify.
+  Future<void> _subscribeStatus(BluetoothCharacteristic c) async {
+    try {
+      await c.setNotifyValue(true, timeout: 8);
+      return;
+    } on FlutterBluePlusException catch (e) {
+      final bool timedOut = e.platform == ErrorPlatform.fbp &&
+          e.code == FbpErrorCode.timeout.index;
+      if (!timedOut || c.device.isDisconnected) rethrow;
+      debugPrint("⚠️ BleManager: status subscribe got no answer — re-subscribing");
+    }
+    try {
+      await c.setNotifyValue(false, timeout: 4);
+    } catch (e) {
+      debugPrint("BleManager: status unsubscribe (before re-subscribe) failed: $e");
+    }
+    await c.setNotifyValue(true, timeout: 8);
+  }
+
+  // Status keep-alive: while connected and the last status is transitional,
+  // re-read it every [statusPollInterval] (at most [statusPollMaxReads]
+  // times). Notifications stay the fast path; this only guarantees that a
+  // lost or never-subscribed notification can't leave the UI on "Checking…"
+  // / "Joining Wi-Fi…" for good.
+  void _startStatusPoll() {
+    _statusPollsLeft = statusPollMaxReads;
+    _scheduleStatusPoll();
+  }
+
+  void _scheduleStatusPoll() {
+    _statusPollTimer?.cancel();
+    _statusPollTimer = null;
+    final BluetoothDevice? device = _connectedDevice;
+    if (device == null ||
+        _statusCharacteristic == null ||
+        _statusPollsLeft <= 0 ||
+        !isStatusTransitional(_connectedWifi)) {
+      return;
+    }
+    _statusPollTimer = Timer(statusPollInterval, () async {
+      if (_connectedDevice != device) return;
+      _statusPollsLeft--;
+      await readStatusUpdate();
+      if (_connectedDevice == device) _scheduleStatusPoll();
+    });
+  }
+
+  // Apply one status value (notification or read) from the toy.
   Future<void> _processStatusData(List<int> data) async {
     if (data.isEmpty) return;
-    
-    String statusString = utf8.decode(data, allowMalformed: true);
+
+    final String statusString = utf8.decode(data, allowMalformed: true);
     debugPrint("📱 BleManager: Received status update: $statusString");
-    
-    // Try to parse as JSON first
-    if (statusString.trim().startsWith('{')) {
-      try {
-        Map<String, dynamic> jsonData = jsonDecode(statusString);
 
-        // Parse "registered" BEFORE emitting the Wi-Fi event, so listeners
-        // that rebuild on it read a consistent snapshot.
-        final reg = jsonData['registered'];
-        if (reg is bool) {
-          _statusRegistered = reg;
-          _updateRegistered();
-        }
-
-        // Extract WiFi status
-        if (jsonData.containsKey('wifi')) {
-          String wifiName = jsonData['wifi'].toString();
-          _connectedWifi = wifiName;
-          _rememberWifiName(wifiName);
-          _wifiStatusController.add(wifiName);
-          
-          // Notify with formatted message
-          String message = WifiUtils.getWifiStatusMessage(wifiName);
-          _wifiStatusMessageController.add(message);
-        }
-        
-        // Extract battery level
-        if (jsonData.containsKey('battery')) {
-          try {
-            // Handle battery value properly based on its type
-            var batteryValue = jsonData['battery'];
-            if (batteryValue is int) {
-              _batteryLevel = batteryValue;
-            } else if (batteryValue is double) {
-              _batteryLevel = batteryValue.toInt();
-            } else {
-              // Remove any non-numeric characters if it's a string
-              String batteryString = batteryValue.toString().replaceAll(RegExp(r'[^0-9]'), '');
-              if (batteryString.isNotEmpty) {
-                _batteryLevel = int.parse(batteryString);
-              }
-            }
-            _batteryStatusController.add(_batteryLevel);
-          } catch (e) {
-            debugPrint("⚠️ BleManager: Failed to parse battery level: $e");
-          }
-        }
-        
-        return;
-      } catch (e) {
-        debugPrint("⚠️ BleManager: Failed to parse JSON: $e, falling back to string parsing");
-        // Fall through to legacy string parsing
-      }
+    final ToyStatus? status = ToyStatus.parse(statusString);
+    if (status == null) {
+      debugPrint("⚠️ BleManager: Unrecognised status value, ignored: $statusString");
+      return;
     }
-    
-    // Legacy string parsing for older firmware (key-value format or simple format)
-    if (statusString.contains("WIFI:") || statusString.contains("BAT:")) {
-      // Handle key-value format
-      Map<String, String> statusValues = {};
-      List<String> parts = statusString.split(',');
-      
-      for (String part in parts) {
-        List<String> keyValue = part.split(':');
-        if (keyValue.length == 2) {
-          String key = keyValue[0].trim();
-          String value = keyValue[1].trim();
-          statusValues[key] = value;
-        }
+
+    // "registered" BEFORE the Wi-Fi event, so listeners that rebuild on it
+    // read a consistent snapshot.
+    if (status.registered != null) {
+      _statusRegistered = status.registered;
+      _updateRegistered();
+    }
+
+    final String? wifiName = status.wifi;
+    if (wifiName != null) {
+      final bool wasTransitional = isStatusTransitional(_connectedWifi);
+      _connectedWifi = wifiName;
+      // Settled -> transitional again (e.g. the toy lost its Wi-Fi and is
+      // rejoining): keep an eye on it with a fresh read budget.
+      if (!wasTransitional && isStatusTransitional(wifiName)) {
+        _startStatusPoll();
       }
-      
-      // Update WiFi status
-      if (statusValues.containsKey('WIFI')) {
-        String wifiName = statusValues['WIFI']!;
-        _connectedWifi = wifiName;
-        _rememberWifiName(wifiName);
-        _wifiStatusController.add(wifiName);
-        
-        // Notify with formatted message
-        String message = WifiUtils.getWifiStatusMessage(wifiName);
-        _wifiStatusMessageController.add(message);
-      }
-      
-      // Update battery level
-      if (statusValues.containsKey('BAT')) {
-        try {
-          String batteryString = statusValues['BAT']!.replaceAll(RegExp(r'[^0-9]'), '');
-          if (batteryString.isNotEmpty) {
-            _batteryLevel = int.parse(batteryString);
-            _batteryStatusController.add(_batteryLevel);
-          }
-        } catch (e) {
-          debugPrint("⚠️ BleManager: Failed to parse battery level: $e");
-        }
-      }
-    } else {
-      // Handle simple format (status,level)
-      List<String> statusParts = statusString.split(',');
-      if (statusParts.isNotEmpty) {
-        // First part is WiFi name
-        String wifiName = statusParts[0];
-        _connectedWifi = wifiName;
-        _rememberWifiName(wifiName);
-        
-        // Second part is battery level (if present)
-        if (statusParts.length >= 2) {
-          try {
-            if (statusParts[1].isNotEmpty) {
-              int batteryValue = int.parse(statusParts[1]);
-              _batteryLevel = batteryValue;
-            }
-          } catch (e) {
-            debugPrint("⚠️ BleManager: Failed to parse battery level: $e");
-          }
-        }
-        
-        // Notify listeners of status changes
-        _wifiStatusController.add(wifiName);
-        _batteryStatusController.add(_batteryLevel);
-        
-        // Notify with formatted message
-        String message = WifiUtils.getWifiStatusMessage(wifiName);
-        _wifiStatusMessageController.add(message);
-      } else {
-        debugPrint("⚠️ BleManager: Status update format invalid: $statusString");
-      }
+      _rememberWifiName(wifiName);
+      _wifiStatusController.add(wifiName);
+      _wifiStatusMessageController.add(WifiUtils.getWifiStatusMessage(wifiName));
+    }
+
+    if (status.battery != null) {
+      _batteryLevel = status.battery!;
+      _batteryStatusController.add(_batteryLevel);
     }
   }
 
@@ -1385,6 +1826,7 @@ class BleManager {
     await prefs.setString(_deviceNameKeyFor(uid), device.platformName);
     _savedToyId = id;
     if (device.platformName.isNotEmpty) _savedToyName = device.platformName;
+    _loadAdvVersion(prefs, id);
     // A different toy is now saved: its own last Wi-Fi name (if any), never
     // the previous toy's.
     if (_lastWifiToyId != id) {
@@ -1414,6 +1856,10 @@ class BleManager {
     _savedToyName = null;
     _lastKnownWifiName = null;
     _lastWifiToyId = null;
+    _lastSeenToyId = null;
+    _lastSeenAdvert = null;
+    _lastSeenAt = null;
+    if (toyId != null) _advVersionByToy.remove(toyId);
     final prefs = await SharedPreferences.getInstance();
     final uid = _uid;
     if (uid != null) {
@@ -1422,10 +1868,14 @@ class BleManager {
       await prefs.remove(_deviceNameKeyFor(uid));
       await prefs.remove(_legacyLastWifiKeyFor(uid));
       for (final id in {toyId, storedId}) {
-        if (id != null) await prefs.remove(_lastWifiKeyFor(id));
+        if (id != null) {
+          await prefs.remove(_lastWifiKeyFor(id));
+          await prefs.remove(_advVersionKeyFor(id));
+        }
       }
     } else if (toyId != null) {
       await prefs.remove(_lastWifiKeyFor(toyId));
+      await prefs.remove(_advVersionKeyFor(toyId));
     }
     // Also drop the legacy global keys so a forgotten toy can't linger there.
     await prefs.remove(_legacyDeviceIdKey);
@@ -1459,6 +1909,7 @@ class BleManager {
 
     _savedToyId = savedId;
     _savedToyName = savedId == null ? null : (savedName ?? "Smarty");
+    if (savedId != null) _loadAdvVersion(prefs, savedId);
     if (savedId == null) {
       _lastKnownWifiName = null;
       _lastWifiToyId = null;
@@ -1577,7 +2028,7 @@ class BleManager {
         debugPrint("BleManager: dropping link to ${live.remoteId.str} — not this account's toy");
         _resetConnectionState();
         try {
-          await live.disconnect();
+          await _disconnectOwn(live);
         } catch (_) {}
         if (gen != _sessionGen) return;
       }
@@ -1715,8 +2166,12 @@ class BleManager {
       if (found.isCompleted) return;
       // Not our scan any more (cancelled, or replaced/stopped by a screen).
       if (token != _probeToken || !FlutterBluePlus.isScanningNow) return;
-      if (results.any((r) => r.device.remoteId == device.remoteId)) {
-        found.complete(true);
+      for (final r in results) {
+        if (r.device.remoteId == device.remoteId) {
+          _recordSighting(r);
+          found.complete(true);
+          return;
+        }
       }
     }, onError: (Object e) {
       debugPrint("⚠️ BleManager: probe scan stream error: $e");
@@ -1785,8 +2240,8 @@ class BleManager {
       throw const ConnectException(ConnectFailure.cancelledByUser);
     }
     _setPhase(ToyPhase.connecting);
+    _watchLink(device);
     if (!device.isConnected) {
-      _linkUpAt = null;
       _connectingDevice = device;
       try {
         await device.connect(timeout: timeout, mtu: null);
@@ -1808,11 +2263,11 @@ class BleManager {
         // Signed out / forgotten while the link came up: it must not carry
         // over to the next account.
         try {
-          await device.disconnect();
+          await _disconnectOwn(device);
         } catch (_) {}
         throw const ConnectException(ConnectFailure.cancelledByUser);
       }
-      _linkUpAt = DateTime.now();
+      _noteLinkUp(device);
     }
     await _initialize(device, gen);
   }
@@ -1853,6 +2308,7 @@ class BleManager {
     // Our listener still attached = we armed it and nothing failed since.
     final bool wasArmed = _pendingSub != null && _armedDevice == device;
     _armedDevice = device;
+    _watchLink(device);
 
     _pendingSub?.cancel();
     final sub = device.connectionState.listen((state) {
@@ -1884,7 +2340,7 @@ class BleManager {
       }
       unawaited(sub.cancel());
       try {
-        await device.disconnect();
+        await _disconnectOwn(device);
       } catch (_) {}
       if (gen != _sessionGen) return;
       if (kind == ConnectFailure.needsPermission) {
@@ -1897,7 +2353,20 @@ class BleManager {
 
   void _onPendingConnected(BluetoothDevice device, int gen) {
     if (gen != _sessionGen) return;
+    _noteLinkUp(device);
     if (_connectedDevice == device && _statusCharacteristic != null) return;
+    if (_needsRepairFor(device)) {
+      // A connect that was already on its way when the pairing was judged
+      // broken: don't initialize (it would only replay the stale keys).
+      debugPrint("BleManager: background connect fired but the pairing needs repair — dropping it");
+      if (_armedDevice == device) {
+        _pendingSub?.cancel();
+        _pendingSub = null;
+        _armedDevice = null;
+      }
+      unawaited(_disconnectOwn(device).catchError((Object _) {}));
+      return;
+    }
     if (_initializeFuture != null) {
       final other = _initializingDevice;
       if (other != null && other.remoteId != device.remoteId) {
@@ -1909,7 +2378,7 @@ class BleManager {
           _pendingSub = null;
           _armedDevice = null;
         }
-        unawaited(device.disconnect().catchError((Object e) {
+        unawaited(_disconnectOwn(device).catchError((Object e) {
           debugPrint("⚠️ BleManager: dropping background link failed: $e");
         }));
       }
@@ -1918,7 +2387,6 @@ class BleManager {
     debugPrint("BleManager: Background connect fired — initializing");
     _pendingSub?.cancel();
     _pendingSub = null;
-    _linkUpAt = DateTime.now();
     _initialize(device, gen).catchError((Object e) {
       debugPrint("BleManager: initialize after background connect failed: $e");
     });
@@ -1947,7 +2415,7 @@ class BleManager {
       if (_initializingDevice?.remoteId == armed.remoteId) return;
     }
     try {
-      await armed.disconnect();
+      await _disconnectOwn(armed);
     } catch (_) {
       // Nothing pending / already disconnected — ignore.
     }
@@ -1969,11 +2437,12 @@ class BleManager {
       _setPhase(ToyPhase.bluetoothOff);
       return;
     }
-    if (_isPairingBrokenReason(reason) || _registerQuickDrop(device)) {
+    // Count this drop (unless the link watcher already did) — a stale
+    // pairing can also show up as a drop right after "connected".
+    if (isPairingBrokenReason(reason) || _noteLinkDown(device)) {
       await _enterPairingBroken(device);
       return;
     }
-    _linkUpAt = null;
     if (gen != _sessionGen) return;
     if (_savedToyId != null && _savedToyId != device.remoteId.str) {
       // Not the saved toy — let the state machine sort it out.
@@ -2002,7 +2471,6 @@ class BleManager {
       default:
         break;
     }
-    _linkUpAt = null;
     final savedId = _savedToyId;
     if (_uid == null || savedId == null) {
       _setPhase(ToyPhase.noToy);
@@ -2031,15 +2499,24 @@ class BleManager {
   }
 
   Future<void> _enterPairingBroken(BluetoothDevice device) async {
-    _linkUpAt = null;
-    _quickDrops = 0;
+    final bool already = _needsRepairFor(device);
+    _drops.reset();
     _repairToyId = device.remoteId.str;
-    await _cancelPendingConnect();
+    _rearmTimer?.cancel();
+    _rearmTimer = null;
+    if (!already) {
+      debugPrint("🧭 BleManager: pairing with ${device.remoteId.str} is broken — "
+          "no more background reconnects until it is repaired");
+    }
+    // Phase first: the rearm timer and every settle path check it (and
+    // [_repairToyId]) before arming anything.
     _setPhase(ToyPhase.pairingBroken);
-    // disconnect() also clears FBP's autoConnect flag — on iOS FBP would
-    // otherwise keep reconnecting by itself with the stale keys.
+    await _cancelPendingConnect();
+    // disconnect() also clears FBP's autoConnect flag (and cancels the iOS 17+
+    // system auto-reconnect FBP asks for) — otherwise iOS would keep
+    // reconnecting by itself with the stale keys.
     try {
-      await device.disconnect();
+      await _disconnectOwn(device);
     } catch (_) {}
     if (Platform.isAndroid) {
       // Drop the stale bond so the next attempt pairs fresh. (iOS has no API
@@ -2053,24 +2530,168 @@ class BleManager {
     }
   }
 
-  // "Disconnected within ~2 s of connecting" is the signature of a toy that
-  // rejects our stale pairing (it starts encryption right after connect). One
-  // such drop could also be a toy switched off at the wrong moment, so it takes
-  // two in a row (the pending reconnect makes the second one come fast).
-  bool _registerQuickDrop(BluetoothDevice device) {
-    final up = _linkUpAt;
-    if (up == null || device.remoteId.str != _savedToyId) return false;
-    if (DateTime.now().difference(up) > const Duration(milliseconds: 2500)) {
-      _quickDrops = 0; // a normal drop breaks the streak
-      return false;
+  // ---- Link watch: stale-pairing detection ---------------------------------
+  //
+  // "Connected, then dropped within a few seconds" is the signature of a toy
+  // that rejects our stale pairing: iOS connects (a pending autoConnect does
+  // so the moment the toy advertises), fails to encrypt with the old keys and
+  // hangs up ~0.4 s later (toy log: reason 0x13, then SMP_CONN_TOUT). One
+  // such drop could also be a toy switched off at the wrong moment, so it
+  // takes two in a row ([LinkDropTracker.threshold]) — unless the drop's
+  // reason already says so.
+
+  // Follow [device]'s link for as long as we connect to / wait for it.
+  // Idempotent per device; switching devices starts a fresh streak.
+  void _watchLink(BluetoothDevice device) {
+    if (_linkWatchSub != null && _linkWatchDevice == device) return;
+    _linkWatchSub?.cancel();
+    _linkWatchDevice = device;
+    if (_dropsToyId != device.remoteId.str) {
+      _drops.reset();
+      _dropsToyId = device.remoteId.str;
     }
-    _quickDrops++;
-    debugPrint("BleManager: quick drop #$_quickDrops after connect");
-    return _quickDrops >= 2;
+    bool replay = true; // FBP replays the current state on listen
+    bool sawUp = false; // a "connected" since the last "disconnected"
+    _linkWatchSub = device.connectionState.listen((state) {
+      final bool first = replay;
+      replay = false;
+      if (state == BluetoothConnectionState.connected) {
+        sawUp = true;
+        // A replayed "connected" is a link of unknown age: don't time it.
+        if (!first) _noteLinkUp(device);
+      } else if (state == BluetoothConnectionState.disconnected) {
+        final bool wasUp = sawUp;
+        sawUp = false;
+        if (first) return; // just the current state, not an event
+        if (wasUp) {
+          _onWatchedLinkDown(device);
+        } else {
+          // "disconnected" with no "connected" before it: a connect attempt
+          // that failed. For a pending autoConnect nobody else ever sees
+          // this (FBP just re-issues the connect), so it is judged here.
+          _onWatchedConnectFailed(device);
+        }
+      }
+    }, onError: (Object e) {
+      debugPrint("⚠️ BleManager: link watch stream error: $e");
+    });
   }
 
+  void _unwatchLink() {
+    _linkWatchSub?.cancel();
+    _linkWatchSub = null;
+    _linkWatchDevice = null;
+    _drops.reset();
+    _dropsToyId = null;
+  }
+
+  void _noteLinkUp(BluetoothDevice device) {
+    // Another toy is being followed (e.g. setup of a new Smarty while the old
+    // one's background connect fires): leave that toy's streak alone.
+    if (_dropsToyId != null && _dropsToyId != device.remoteId.str) return;
+    _dropsToyId = device.remoteId.str;
+    _drops.linkUp(DateTime.now());
+  }
+
+  // Record that [device]'s link went down — once per link, whichever path
+  // sees it first (link watch, _onLinkLost, a failed initialize). Returns
+  // true when this drop means the pairing is broken. Quick-drop streaks only
+  // count for the saved toy; a pairing-broken REASON counts for any toy.
+  // Must stay synchronous: the reason is only reliable right at the drop.
+  bool _noteLinkDown(BluetoothDevice device) {
+    if (_dropsToyId != device.remoteId.str) return false;
+    final DisconnectReason? reason = device.disconnectReason;
+    final bool ours = (_ownDisconnects[device.remoteId.str] ?? 0) > 0 ||
+        isOwnDisconnectReason(reason) ||
+        FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on;
+    final LinkDropVerdict? verdict = _drops.linkDown(
+      DateTime.now(),
+      pairingReason: !ours && isPairingBrokenReason(reason),
+      intentional: ours,
+    );
+    if (verdict == null) return false;
+    debugPrint("BleManager: link down — ${verdict.name}"
+        "${verdict == LinkDropVerdict.quick ? ' #${_drops.quickDrops}' : ''} ($reason)");
+    switch (verdict) {
+      case LinkDropVerdict.pairingReason:
+        return true;
+      case LinkDropVerdict.repeatedQuickDrops:
+        return device.remoteId.str == _savedToyId;
+      default:
+        return false;
+    }
+  }
+
+  // The link watch saw [device] drop. If that settles "pairing broken" for
+  // the saved toy, stop everything right here — even when the drop landed
+  // mid-initialize or before any other listener was attached.
+  void _onWatchedLinkDown(BluetoothDevice device) {
+    if (!_noteLinkDown(device)) return;
+    if (_uid == null || device.remoteId.str != _savedToyId) return;
+    unawaited(_enterPairingBroken(device));
+  }
+
+  // A connect attempt on the watched toy failed before the link came up. On
+  // iOS a stale pairing surfaces exactly like this for a pending autoConnect
+  // (didFailToConnectPeripheral "Peer removed pairing information" — the
+  // toy logs Connected, then reason 0x13 ~0.4 s later), and FBP re-issues
+  // the autoConnect after every such event, so without this check the app
+  // would retry forever without ever hearing about it.
+  void _onWatchedConnectFailed(BluetoothDevice device) {
+    final String id = device.remoteId.str;
+    if (_dropsToyId != id) return;
+    final DisconnectReason? reason = device.disconnectReason;
+    final bool ours = (_ownDisconnects[id] ?? 0) > 0 ||
+        isOwnDisconnectReason(reason) ||
+        FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on;
+    if (ours || reason == null || reason.code == null) return;
+    final bool pairing = isPairingBrokenReason(reason);
+    // Android reports routine connect failures (GATT 133 …) this way too;
+    // there only a pairing reason counts. (iOS never fails a connect for
+    // mere absence — a pending connect just waits.)
+    if (!pairing && reason.platform != ErrorPlatform.apple) return;
+    final LinkDropVerdict verdict = _drops.linkFailed(pairingReason: pairing);
+    debugPrint("BleManager: connect attempt failed — ${verdict.name}"
+        "${verdict == LinkDropVerdict.quick ? ' #${_drops.quickDrops}' : ''} ($reason)");
+    if (verdict != LinkDropVerdict.pairingReason &&
+        verdict != LinkDropVerdict.repeatedQuickDrops) {
+      return;
+    }
+    if (_uid == null || id != _savedToyId) return;
+    unawaited(_enterPairingBroken(device));
+  }
+
+  // Our own disconnect(): the drop it causes is not the toy's doing.
+  Future<void> _disconnectOwn(BluetoothDevice device) async {
+    final String id = device.remoteId.str;
+    _ownDisconnects[id] = (_ownDisconnects[id] ?? 0) + 1;
+    try {
+      await device.disconnect();
+    } finally {
+      final int left = (_ownDisconnects[id] ?? 1) - 1;
+      if (left <= 0) {
+        _ownDisconnects.remove(id);
+      } else {
+        _ownDisconnects[id] = left;
+      }
+    }
+  }
+
+  /// FBP's iOS/macOS reason code for a disconnect the app asked for
+  /// (cancelPeripheralConnection reports no error; FBP substitutes this).
+  static const int fbpAppleUserCanceledCode = 23789258;
+
+  /// Whether [reason] is FBP's "we cancelled it ourselves" marker. Pure.
+  @visibleForTesting
+  static bool isOwnDisconnectReason(DisconnectReason? reason) =>
+      reason != null &&
+      reason.platform == ErrorPlatform.apple &&
+      reason.code == fbpAppleUserCanceledCode;
+
   // Classification for a failure on [device]: the error itself first, then
-  // the link's own disconnect reason, then the quick-drop heuristic.
+  // the link's own disconnect reason / quick-drop streak (counting this drop
+  // unless the link watch already did), then a verdict the link watch
+  // reached meanwhile.
   ConnectFailure _classifyForDevice(Object error, BluetoothDevice device) {
     final kind = classifyConnectError(error);
     if (kind == ConnectFailure.pairingBroken ||
@@ -2080,11 +2701,12 @@ class BleManager {
       return kind;
     }
     if (device.isDisconnected) {
-      if (_isPairingBrokenReason(device.disconnectReason)) {
+      if (isPairingBrokenReason(device.disconnectReason)) {
         return ConnectFailure.pairingBroken;
       }
-      if (_registerQuickDrop(device)) return ConnectFailure.pairingBroken;
+      if (_noteLinkDown(device)) return ConnectFailure.pairingBroken;
     }
+    if (_needsRepairFor(device)) return ConnectFailure.pairingBroken;
     return kind;
   }
 
@@ -2107,7 +2729,10 @@ class BleManager {
   //  - iOS CBError 14 peerRemovedPairingInformation, 15 encryptionTimedOut
   //  - Android HCI 0x05 AUTHENTICATION_FAILURE, 0x06 PIN_OR_KEY_MISSING,
   //    0x3D CONNECTION_TERMINATED_MIC_FAILURE
-  static bool _isPairingBrokenReason(DisconnectReason? reason) {
+  /// Whether a link's disconnect [reason] means "the toy rejected our keys".
+  /// Pure; exposed for tests.
+  @visibleForTesting
+  static bool isPairingBrokenReason(DisconnectReason? reason) {
     if (reason == null) return false;
     final code = reason.code;
     if (reason.platform == ErrorPlatform.apple && (code == 14 || code == 15)) {
@@ -2272,7 +2897,7 @@ class BleManager {
     _connectingDevice = null;
     if (connecting != null && connecting.remoteId != device?.remoteId) {
       try {
-        await connecting.disconnect();
+        await _disconnectOwn(connecting);
       } catch (_) {}
     }
     await _cancelPendingConnect();
@@ -2280,12 +2905,11 @@ class BleManager {
     // disconnect below doesn't fire the link-lost handler, which would re-arm
     // a connect to the toy we're forgetting.
     _resetConnectionState();
-    _linkUpAt = null;
-    _quickDrops = 0;
+    _unwatchLink();
     _consecutiveFailures = 0;
     if (device != null) {
       try {
-        await device.disconnect();
+        await _disconnectOwn(device);
       } catch (e) {
         debugPrint("BleManager: Error disconnecting: $e");
       }
@@ -2333,13 +2957,15 @@ class BleManager {
     // disconnect below doesn't fire the link-lost handler (which would re-arm
     // a reconnect right after logout).
     _resetConnectionState();
-    _linkUpAt = null;
-    _quickDrops = 0;
+    _unwatchLink();
     _consecutiveFailures = 0;
     _savedToyId = null;
     _savedToyName = null;
     _lastKnownWifiName = null;
     _lastWifiToyId = null;
+    _lastSeenToyId = null;
+    _lastSeenAdvert = null;
+    _lastSeenAt = null;
     _wifiStatusController.add("NotConnected");
     final toDrop = <BluetoothDevice>[
       if (device != null) device,
@@ -2348,7 +2974,7 @@ class BleManager {
     ];
     for (final d in toDrop) {
       try {
-        await d.disconnect();
+        await _disconnectOwn(d);
       } catch (e) {
         debugPrint("BleManager: Error disconnecting during reset: $e");
       }
