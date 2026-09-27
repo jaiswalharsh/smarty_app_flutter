@@ -1,10 +1,11 @@
 // Home's pull-to-refresh must work from anywhere on the screen — including
-// the empty space below short content — not only on the toy card.
+// the empty space below short content — not only on the Smarty card.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:smarty_app/home_tab.dart';
 import 'package:smarty_app/services/ble_manager.dart';
+import 'package:smarty_app/widgets/smarty_card.dart';
 
 void main() {
   group('PullToRefreshArea', () {
@@ -84,9 +85,14 @@ void main() {
     final Size screen = tester.view.physicalSize / tester.view.devicePixelRatio;
     final Rect area = tester.getRect(find.byType(Scrollable));
     expect(area, Offset.zero & screen);
-    // The toy card is still where it was (20 px in from the edges).
+    // The Smarty card is still where it was (20 px in from the edges), and
+    // inside the pull area.
     expect(tester.getTopLeft(find.text('Looking for Smarty…')).dy,
         greaterThan(20));
+    expect(
+        find.descendant(
+            of: find.byType(Scrollable), matching: find.byType(SmartyCard)),
+        findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
   });

@@ -6,17 +6,17 @@ import '../models/conversation.dart';
 import 'ble_manager.dart';
 
 /// The parent is signed out (or the session is no longer accepted): the UI
-/// shows a sign-in prompt instead of an error. See [convosNeedsSignIn].
-class ConvosSignedOut implements Exception {
-  const ConvosSignedOut();
+/// shows a sign-in prompt instead of an error. See [conversationsNeedSignIn].
+class ConversationsSignedOut implements Exception {
+  const ConversationsSignedOut();
   @override
-  String toString() => 'ConvosSignedOut';
+  String toString() => 'ConversationsSignedOut';
 }
 
-/// Whether [error] (from a [ConvosSource] stream or future) means "sign in
-/// again" rather than "something broke".
-bool convosNeedsSignIn(Object? error) {
-  if (error is ConvosSignedOut) return true;
+/// Whether [error] (from a [ConversationsSource] stream or future) means
+/// "sign in again" rather than "something broke".
+bool conversationsNeedSignIn(Object? error) {
+  if (error is ConversationsSignedOut) return true;
   if (error is FirebaseException) {
     return error.code == 'permission-denied' ||
         error.code == 'unauthenticated';
@@ -24,11 +24,11 @@ bool convosNeedsSignIn(Object? error) {
   return false;
 }
 
-/// What the Convos screens read. [ConvosService] reads Firestore; tests use
-/// a fake.
-abstract class ConvosSource {
+/// What the Conversations screens read. [ConversationsService] reads
+/// Firestore; tests use a fake.
+abstract class ConversationsSource {
   /// The toy whose chats to show, or null when this account has none.
-  /// Throws [ConvosSignedOut] when signed out.
+  /// Throws [ConversationsSignedOut] when signed out.
   Future<String?> resolveDeviceId();
 
   /// Days with chats, newest first, at most [limit].
@@ -48,8 +48,8 @@ abstract class ConvosSource {
 /// Reads chat history from Firestore:
 /// `parents/{uid}/devices/{deviceId}/{days, conversations/*/turns}` — each
 /// method is one realtime listener scoped to what one screen shows.
-class ConvosService implements ConvosSource {
-  ConvosService({FirebaseFirestore? db, FirebaseAuth? auth})
+class ConversationsService implements ConversationsSource {
+  ConversationsService({FirebaseFirestore? db, FirebaseAuth? auth})
       : _dbOverride = db,
         _authOverride = auth;
 
@@ -62,14 +62,14 @@ class ConvosService implements ConvosSource {
 
   CollectionReference<Map<String, dynamic>> _devices() {
     final String? uid = _auth.currentUser?.uid;
-    if (uid == null) throw const ConvosSignedOut();
+    if (uid == null) throw const ConversationsSignedOut();
     return _db.collection('parents').doc(uid).collection('devices');
   }
 
   DocumentReference<Map<String, dynamic>> _device(String deviceId) =>
       _devices().doc(deviceId);
 
-  /// Lifts a synchronous [ConvosSignedOut] (or any setup error) into the
+  /// Lifts a synchronous [ConversationsSignedOut] (or any setup error) into the
   /// stream, so the UI handles it like any other stream error.
   Stream<T> _guard<T>(Stream<T> Function() open) {
     try {
@@ -97,7 +97,7 @@ class ConvosService implements ConvosSource {
         if (tb is Timestamp) return 1;
         return a.id.compareTo(b.id);
       });
-    debugPrint('Convos: showing toy ${docs.first.id} '
+    debugPrint('Conversations: showing toy ${docs.first.id} '
         '(${snap.docs.length} on the account)');
     return docs.first.id;
   }

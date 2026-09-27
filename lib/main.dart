@@ -8,7 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dev_config.dart';
 import 'home_tab.dart';
-import 'screens/convos/convos_tab.dart';
+import 'screens/conversations/conversations_tab.dart';
 import 'settings_tab.dart';
 import 'providers/user_context_provider.dart';
 import 'utils/theme_provider.dart';
@@ -249,7 +249,7 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   int _currentIndex = 0;
 
-  static const int _convosIndex = 1;
+  static const int _conversationsIndex = 1;
 
   @override
   void initState() {
@@ -292,7 +292,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         children: [
           HomeTab(),
           // Listens only while it is the visible tab.
-          ConvosTab(isActive: _currentIndex == _convosIndex),
+          ConversationsTab(isActive: _currentIndex == _conversationsIndex),
           SettingsTab(),
         ],
       ),
@@ -328,7 +328,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
               BottomNavigationBarItem(
                 icon: Icon(Icons.chat_bubble_outline_rounded),
                 activeIcon: Icon(Icons.chat_bubble_rounded),
-                label: 'Convos',
+                label: 'Conversations',
               ),
               BottomNavigationBarItem(
                 icon: Icon(Icons.settings_rounded),

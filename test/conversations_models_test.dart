@@ -1,5 +1,5 @@
-// Convos models: parsing, live window, transcript order, day labels and the
-// one-chat-per-day merge. Pure Dart — no Firebase.
+// Conversations models: parsing, live window, transcript order, day labels
+// and the one-chat-per-day merge. Pure Dart — no Firebase.
 import 'package:cloud_firestore/cloud_firestore.dart' show Timestamp;
 import 'package:flutter_test/flutter_test.dart';
 

@@ -1630,6 +1630,17 @@ class BleManager {
     }
   }
 
+  /// Tests only: apply a raw status value ([raw], e.g.
+  /// `{"wifi":"HomeNet","registered":false}`) as if Smarty had sent it.
+  @visibleForTesting
+  Future<void> debugApplyStatus(String raw) =>
+      _processStatusData(utf8.encode(raw));
+
+  /// Tests only: forget whatever [debugApplyStatus] set (no Wi-Fi status, no
+  /// "registered"), as after a disconnect.
+  @visibleForTesting
+  void debugResetConnectionState() => _resetConnectionState();
+
   // Write the free-form user context string to Smarty (char 0xAB03).
   // Uses an acknowledged (long, if needed) write so the BLE stack surfaces
   // failures. Throws [ArgumentError] if the UTF-8 encoding exceeds

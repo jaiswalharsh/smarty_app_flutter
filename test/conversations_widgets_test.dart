@@ -1,6 +1,6 @@
-// Convos screens against a fake data source (no Firebase): the day row, the
-// streaming bubble, the one-chat-per-day page, the tab's states and Home's
-// live line.
+// Conversations screens against a fake data source (no Firebase): the day
+// row, the streaming bubble, the one-chat-per-day page, the tab's states and
+// Home's live line.
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart' show FirebaseException;
@@ -8,15 +8,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:smarty_app/models/conversation.dart';
-import 'package:smarty_app/screens/convos/convos_tab.dart';
-import 'package:smarty_app/screens/convos/convos_widgets.dart';
-import 'package:smarty_app/screens/convos/day_chat_page.dart';
-import 'package:smarty_app/screens/convos/live_chat_banner.dart';
-import 'package:smarty_app/services/convos_service.dart';
+import 'package:smarty_app/screens/conversations/conversations_tab.dart';
+import 'package:smarty_app/screens/conversations/conversations_widgets.dart';
+import 'package:smarty_app/screens/conversations/day_chat_page.dart';
+import 'package:smarty_app/screens/conversations/live_chat_banner.dart';
+import 'package:smarty_app/services/conversations_service.dart';
 
 /// Streams driven by the test; one controller per query.
-class FakeConvosSource implements ConvosSource {
-  FakeConvosSource({this.deviceId = 'toy1', this.resolveError});
+class FakeConversationsSource implements ConversationsSource {
+  FakeConversationsSource({this.deviceId = 'toy1', this.resolveError});
 
   final String? deviceId;
   final Object? resolveError;
@@ -156,7 +156,7 @@ void main() {
     testWidgets(
         'one chat for the day: sessions in order with their start times, '
         'a reply growing live, then final', (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await tester.pumpWidget(MaterialApp(
         home: DayChatPage(deviceId: 'toy1', day: todayKey(), source: src),
       ));
@@ -225,7 +225,7 @@ void main() {
 
     testWidgets('follows new messages at the bottom, not after scrolling up',
         (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await tester.pumpWidget(MaterialApp(
         home: DayChatPage(deviceId: 'toy1', day: '2026-09-20', source: src),
       ));
@@ -268,7 +268,7 @@ void main() {
 
     testWidgets('a session that disappears stops being listened to',
         (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await tester.pumpWidget(MaterialApp(
         home: DayChatPage(deviceId: 'toy1', day: '2026-09-20', source: src),
       ));
@@ -285,7 +285,7 @@ void main() {
 
     testWidgets('permission denied → sign-in prompt, not an error',
         (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await tester.pumpWidget(MaterialApp(
         home: DayChatPage(deviceId: 'toy1', day: '2026-09-20', source: src),
       ));
@@ -298,14 +298,45 @@ void main() {
     });
   });
 
-  group('ConvosTab', () {
-    Future<void> pumpTab(WidgetTester tester, FakeConvosSource src) async {
-      await tester.pumpWidget(MaterialApp(home: ConvosTab(source: src)));
+  group('ConversationsTab', () {
+    Future<void> pumpTab(
+        WidgetTester tester, FakeConversationsSource src) async {
+      await tester.pumpWidget(MaterialApp(home: ConversationsTab(source: src)));
       await tester.pump(); // device resolved
     }
 
+    testWidgets('the title says "Conversations"', (tester) async {
+      final src = FakeConversationsSource();
+      await pumpTab(tester, src);
+      expect(find.text('Conversations'), findsOneWidget);
+      await unmount(tester);
+    });
+
+    testWidgets('large text: the title scales down instead of wrapping',
+        (tester) async {
+      final src = FakeConversationsSource();
+      await tester.pumpWidget(MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(3)),
+          child: child!,
+        ),
+        home: ConversationsTab(source: src),
+      ));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      final Size screen =
+          tester.view.physicalSize / tester.view.devicePixelRatio;
+      final Rect title = tester.getRect(find.text('Conversations'));
+      expect(title.right, lessThanOrEqualTo(screen.width - 16));
+      // Never wraps (mid-word) — it's scaled down to fit instead.
+      final Text text = tester.widget<Text>(find.text('Conversations'));
+      expect(text.maxLines, 1);
+      await unmount(tester);
+    });
+
     testWidgets('no chats yet: the empty-state copy', (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await pumpTab(tester, src);
       src.days.add([]);
       await tester.pump();
@@ -318,7 +349,7 @@ void main() {
 
     testWidgets('days newest first; tapping one opens that day as one chat',
         (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await pumpTab(tester, src);
       expect(src.dayLimits, [30]);
       src.days.add([
@@ -344,7 +375,7 @@ void main() {
     });
 
     testWidgets('a full page offers earlier days', (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await pumpTab(tester, src);
       src.days.add([
         for (int i = 1; i <= 30; i++)
@@ -359,38 +390,41 @@ void main() {
     });
 
     testWidgets('no toy on the account: points to setup', (tester) async {
-      await pumpTab(tester, FakeConvosSource(deviceId: null));
+      await pumpTab(tester, FakeConversationsSource(deviceId: null));
       expect(find.text('No chats yet'), findsOneWidget);
       await unmount(tester);
     });
 
     testWidgets('signed out: sign-in prompt', (tester) async {
-      await pumpTab(
-          tester, FakeConvosSource(resolveError: const ConvosSignedOut()));
+      await pumpTab(tester,
+          FakeConversationsSource(resolveError: const ConversationsSignedOut()));
       expect(find.text('Please sign in again'), findsOneWidget);
       await unmount(tester);
     });
 
     testWidgets('other failures: plain words and a retry', (tester) async {
-      await pumpTab(tester,
-          FakeConvosSource(resolveError: FirebaseException(plugin: 'x', code: 'unavailable')));
+      await pumpTab(
+          tester,
+          FakeConversationsSource(
+              resolveError:
+                  FirebaseException(plugin: 'x', code: 'unavailable')));
       expect(find.text("Couldn't load chats"), findsOneWidget);
       expect(find.text('Try again'), findsOneWidget);
       await unmount(tester);
     });
 
     testWidgets('listens only while it is the visible tab', (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await tester.pumpWidget(
-          MaterialApp(home: ConvosTab(source: src, isActive: false)));
+          MaterialApp(home: ConversationsTab(source: src, isActive: false)));
       await tester.pump();
       expect(src.days.hasListener, isFalse);
       await tester.pumpWidget(
-          MaterialApp(home: ConvosTab(source: src, isActive: true)));
+          MaterialApp(home: ConversationsTab(source: src, isActive: true)));
       await tester.pump();
       expect(src.days.hasListener, isTrue);
       await tester.pumpWidget(
-          MaterialApp(home: ConvosTab(source: src, isActive: false)));
+          MaterialApp(home: ConversationsTab(source: src, isActive: false)));
       expect(src.days.hasListener, isFalse);
       await unmount(tester);
     });
@@ -399,7 +433,7 @@ void main() {
   group('Home live line', () {
     testWidgets('shows while today is live, and opens today\'s chat',
         (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(body: LiveChatBanner(source: src)),
       ));
@@ -425,7 +459,7 @@ void main() {
 
     testWidgets('hidden when the day went quiet, or on errors',
         (tester) async {
-      final src = FakeConvosSource();
+      final src = FakeConversationsSource();
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(body: LiveChatBanner(source: src)),
       ));
@@ -440,7 +474,7 @@ void main() {
       expect(find.byType(LiveClock), findsOneWidget); // got the day…
       expect(find.byType(InkWell), findsNothing); // …but it's quiet
 
-      final broken = FakeConvosSource(resolveError: Exception('offline'));
+      final broken = FakeConversationsSource(resolveError: Exception('offline'));
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(body: LiveChatBanner(source: broken)),
       ));

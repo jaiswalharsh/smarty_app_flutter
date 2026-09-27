@@ -335,8 +335,8 @@ class _YourAccountPageState extends State<YourAccountPage> {
   }
 }
 
-/// One tappable line in an account card (styled like Home's Smarty rows,
-/// `ToyShortcutRow` in widgets/toy_shortcuts.dart).
+/// One tappable line in an account card (styled like the rows of Home's
+/// Smarty card, `SmartyCardRow` in widgets/smarty_card.dart).
 class _AccountRow extends StatelessWidget {
   const _AccountRow({
     required this.icon,

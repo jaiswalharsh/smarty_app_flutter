@@ -3,32 +3,33 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../models/conversation.dart';
-import '../../services/convos_service.dart';
-import 'convos_widgets.dart';
+import '../../services/conversations_service.dart';
+import 'conversations_widgets.dart';
 import 'day_chat_page.dart';
 
-/// The Convos tab: the days your child talked with Smarty, newest first,
-/// with a Live pill on the day a chat is happening. Tapping a day opens that
-/// whole day as one chat.
+/// The Conversations tab: the days your child talked with Smarty, newest
+/// first, with a Live pill on the day a chat is happening. Tapping a day
+/// opens that whole day as one chat.
 ///
 /// Lives in the shell's IndexedStack, so it stays mounted: it only listens
 /// while [isActive] (the visible tab) and keeps the last list meanwhile.
-class ConvosTab extends StatefulWidget {
+class ConversationsTab extends StatefulWidget {
   final bool isActive;
-  final ConvosSource? source;
+  final ConversationsSource? source;
 
-  const ConvosTab({super.key, this.isActive = true, this.source});
+  const ConversationsTab({super.key, this.isActive = true, this.source});
 
   @override
-  State<ConvosTab> createState() => _ConvosTabState();
+  State<ConversationsTab> createState() => _ConversationsTabState();
 }
 
 enum _DeviceState { unknown, loading, none, found, signIn, failed }
 
-class _ConvosTabState extends State<ConvosTab> {
+class _ConversationsTabState extends State<ConversationsTab> {
   static const int pageSize = 30;
 
-  late final ConvosSource _source = widget.source ?? ConvosService();
+  late final ConversationsSource _source =
+      widget.source ?? ConversationsService();
   _DeviceState _deviceState = _DeviceState.unknown;
   String? _deviceId;
   int _resolveGen = 0;
@@ -48,7 +49,7 @@ class _ConvosTabState extends State<ConvosTab> {
   }
 
   @override
-  void didUpdateWidget(ConvosTab old) {
+  void didUpdateWidget(ConversationsTab old) {
     super.didUpdateWidget(old);
     if (widget.isActive == old.isActive) return;
     if (!widget.isActive) {
@@ -80,8 +81,10 @@ class _ConvosTabState extends State<ConvosTab> {
       id = await _source.resolveDeviceId();
       next = id == null ? _DeviceState.none : _DeviceState.found;
     } catch (e) {
-      debugPrint('Convos: could not find the toy: $e');
-      next = convosNeedsSignIn(e) ? _DeviceState.signIn : _DeviceState.failed;
+      debugPrint('Conversations: could not find the toy: $e');
+      next = conversationsNeedSignIn(e)
+          ? _DeviceState.signIn
+          : _DeviceState.failed;
     }
     if (!mounted || gen != _resolveGen) return;
     final bool changed = id != _deviceId;
@@ -111,7 +114,7 @@ class _ConvosTabState extends State<ConvosTab> {
         _error = null;
       });
     }, onError: (Object e) {
-      debugPrint('Convos: days listener error: $e');
+      debugPrint('Conversations: days listener error: $e');
       if (mounted) setState(() => _error = e);
     });
   }
@@ -181,12 +184,12 @@ class _ConvosTabState extends State<ConvosTab> {
         }
         break; // re-checking with a list on screen: keep showing it
       case _DeviceState.signIn:
-        return _scrollableMessage(ConvosMessage.signIn(context));
+        return _scrollableMessage(ConversationsMessage.signIn(context));
       case _DeviceState.failed:
         return _scrollableMessage(
-            ConvosMessage.failed(onRetry: () => unawaited(_resolve())));
+            ConversationsMessage.failed(onRetry: () => unawaited(_resolve())));
       case _DeviceState.none:
-        return _scrollableMessage(const ConvosMessage(
+        return _scrollableMessage(const ConversationsMessage(
           icon: Icons.toys_outlined,
           title: 'No chats yet',
           message: "Finish setting up Smarty on the Home tab, and your "
@@ -198,9 +201,9 @@ class _ConvosTabState extends State<ConvosTab> {
 
     final error = _error;
     if (error != null) {
-      return _scrollableMessage(convosNeedsSignIn(error)
-          ? ConvosMessage.signIn(context)
-          : ConvosMessage.failed(onRetry: () {
+      return _scrollableMessage(conversationsNeedSignIn(error)
+          ? ConversationsMessage.signIn(context)
+          : ConversationsMessage.failed(onRetry: () {
               setState(() => _error = null);
               _listen();
             }));
@@ -211,7 +214,7 @@ class _ConvosTabState extends State<ConvosTab> {
           const Center(child: CircularProgressIndicator()));
     }
     if (days.isEmpty) {
-      return _scrollableMessage(const ConvosMessage(
+      return _scrollableMessage(const ConversationsMessage(
         icon: Icons.forum_outlined,
         message: 'When your child talks to Smarty, their chats will show '
             'up here.',
@@ -256,12 +259,19 @@ class _Header extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Convos',
-            style: TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
-              color: dark ? const Color(0xFFFF6EC7) : Colors.blue.shade800,
+          // One word that can't wrap: at very large text sizes it scales
+          // down to fit rather than breaking mid-word.
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Conversations',
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+                color: dark ? const Color(0xFFFF6EC7) : Colors.blue.shade800,
+              ),
             ),
           ),
           const SizedBox(height: 4),

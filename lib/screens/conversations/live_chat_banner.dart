@@ -3,15 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../models/conversation.dart';
-import '../../services/convos_service.dart';
-import 'convos_widgets.dart';
+import '../../services/conversations_service.dart';
+import 'conversations_widgets.dart';
 import 'day_chat_page.dart';
 
 /// Home's one-liner while the child is talking to Smarty right now: "Smarty
 /// is talking with your child — tap to watch", opening today's chat.
 /// Invisible otherwise, and on any error (Home has its own job).
 class LiveChatBanner extends StatefulWidget {
-  final ConvosSource? source;
+  final ConversationsSource? source;
 
   const LiveChatBanner({super.key, this.source});
 
@@ -20,7 +20,8 @@ class LiveChatBanner extends StatefulWidget {
 }
 
 class _LiveChatBannerState extends State<LiveChatBanner> {
-  late final ConvosSource _source = widget.source ?? ConvosService();
+  late final ConversationsSource _source =
+      widget.source ?? ConversationsService();
   StreamSubscription<ConvoDay?>? _sub;
   String? _deviceId;
   ConvoDay? _today;
@@ -45,11 +46,11 @@ class _LiveChatBannerState extends State<LiveChatBanner> {
       _sub = _source.watchToday(id).listen((day) {
         if (mounted) setState(() => _today = day);
       }, onError: (Object e) {
-        debugPrint('Convos: live banner listener error: $e');
+        debugPrint('Conversations: live banner listener error: $e');
         if (mounted) setState(() => _today = null);
       });
     } catch (e) {
-      debugPrint('Convos: live banner off: $e');
+      debugPrint('Conversations: live banner off: $e');
     }
   }
 

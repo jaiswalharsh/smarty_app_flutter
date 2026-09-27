@@ -7,15 +7,15 @@ import 'dev_config.dart';
 import 'screens/user_context_page.dart';
 import 'services/ble_manager.dart';
 import 'services/ble_service.dart';
-import 'screens/convos/live_chat_banner.dart';
+import 'screens/conversations/live_chat_banner.dart';
 import 'screens/devices/setup_steps.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/wifi/wifi_config_page.dart';
 import 'widgets/forget_toy.dart';
 import 'widgets/numbered_steps.dart';
-import 'widgets/toy_shortcuts.dart';
+import 'widgets/smarty_card.dart';
 
-/// One-line, parent-facing status for the toy on Home's toy card ([short]:
+/// One-line, parent-facing status for the toy on Home's Smarty card ([short]:
 /// the compact form). Plain words only — no "device", "scan", "BLE".
 /// [statusStalled] = a connected toy never answered the status read.
 /// [phase] defaults to [BleManager.phase].
@@ -125,7 +125,7 @@ String toyStatusLineFor({
   return 'Ready to play';
 }
 
-/// Whether Home's toy card shows its small inline spinner. Pure (tests).
+/// Whether Home's Smarty card shows its small inline spinner. Pure (tests).
 ///
 /// Probing / connecting always spin — except while a pull-to-refresh is
 /// running ([pullRefreshing]): the pull's own spinner is already on screen,
@@ -183,8 +183,8 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   // Repaints "Smarty is on — connecting…" back to "asleep or out of reach"
   // once the probe's sighting is no longer recent.
   Timer? _sightingTimer;
-  // A pull-to-refresh is running: its own spinner is showing, so the cards
-  // hide theirs (one spinner at a time).
+  // A pull-to-refresh is running: its own spinner is showing, so the card
+  // hides its own (one spinner at a time).
   bool _pullRefreshing = false;
   // Looking / connecting for longer than [_busyHintAfter]: the busy view then
   // offers "Check again" instead of spinning with no way out.
@@ -201,7 +201,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   void initState() {
     super.initState();
 
-    // Repaint the connected card whenever the toy reports status.
+    // Repaint the card whenever the toy reports status.
     _wifiStatusSubscription = _bleManager.wifiStatusStream.listen((_) {
       if (!mounted) return;
       // A status event just proved the link is alive — stand down the stall watch.
@@ -304,8 +304,8 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _animationController.forward(from: 0);
   }
 
-  // Manual status refresh (pull-to-refresh, "Check again", the Wi-Fi card's
-  // retry): a fresh read of the status when connected, otherwise a fresh
+  // Manual status refresh (pull-to-refresh, "Check again", the Wi-Fi row's
+  // refresh): a fresh read of the status when connected, otherwise a fresh
   // look for the toy. Always completes within a few seconds — a
   // RefreshIndicator spins until it does — while the read / look itself
   // carries on in the background and updates the screen when it lands.
@@ -334,7 +334,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _armWifiStallTimer();
   }
 
-  // Pull-to-refresh: the same refresh, with the cards' own spinners hidden
+  // Pull-to-refresh: the same refresh, with the card's own spinner hidden
   // while the pull's spinner shows.
   Future<void> _onPullToRefresh() async {
     if (mounted) setState(() => _pullRefreshing = true);
@@ -465,105 +465,90 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
-  // The toy's own card: name ("Smarty"), the 4-char code as small secondary
-  // text, and a one-line status. [busy] shows a small inline spinner. The
-  // "⋯" button holds the rarely used actions (Forget this Smarty).
-  Widget _buildToyCard({required String subtitle, bool busy = false}) {
+  // Every state with a saved toy is this one Smarty card: the header (name,
+  // code, [status], a small spinner when [busy], "⋯" → Forget this Smarty),
+  // the Wi-Fi and About your child rows, and [footer] (what to do next).
+  // [below] sits under the card (the live-chat banner). Pull-to-refresh
+  // re-runs the check from anywhere on the screen.
+  Widget _buildCardView({
+    required ToyPhase phase,
+    required String status,
+    bool busy = false,
+    List<Widget> footer = const [],
+    List<Widget> below = const [],
+  }) {
     final String? rawName = _bleManager.savedToyName;
-    final String title = BleManager.toyDisplayName(rawName);
-    final String? code = BleManager.toyCode(rawName);
-
-    return Container(
-      padding: EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.blue.shade50,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
+    return _pullToRefresh(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            padding: EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Colors.blue.shade100,
-              shape: BoxShape.circle,
-            ),
-            child: Image.asset('assets/images/icon.png', width: 24, height: 24),
-          ),
-          SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.blue.shade900,
-                      ),
-                    ),
-                    if (code != null) ...[
-                      SizedBox(width: 8),
-                      Text(
-                        code,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.blue.shade400,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-                SizedBox(height: 4),
-                Row(
-                  children: [
-                    if (busy) ...[
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.blue.shade700,
-                        ),
-                      ),
-                      SizedBox(width: 8),
-                    ],
-                    Expanded(
-                      child: Text(
-                        subtitle,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.blue.shade700,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          ToyMoreButton(
-            color: Colors.blue.shade700,
+          SmartyCard(
+            name: BleManager.toyDisplayName(rawName),
+            code: BleManager.toyCode(rawName),
+            status: status,
+            busy: busy,
             onForget: () => unawaited(_forgetToy()),
+            rows: [
+              _buildWifiRow(phase),
+              SmartyCardRow(
+                icon: Icons.chat_bubble,
+                label: 'About your child',
+                detail: 'What Smarty should know about your child',
+                onTap: _openAboutChild,
+              ),
+            ],
+            footer: footer,
           ),
+          ...below,
         ],
       ),
     );
   }
 
-  // Wi-Fi / About your child, under the toy card whenever a toy is saved.
-  Widget _buildShortcuts() {
-    if (!homeShowsToyShortcuts(_phase.value)) return const SizedBox.shrink();
-    return ToyShortcuts(
-      connected: _phase.value == ToyPhase.connected,
+  // The card's only Wi-Fi line. Smarty's Wi-Fi is set over Bluetooth, so the
+  // row opens the Wi-Fi page only while Smarty is connected.
+  Widget _buildWifiRow(ToyPhase phase) {
+    final bool connected = phase == ToyPhase.connected;
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    final WifiRowInfo info = wifiRowInfo(
+      connected: connected,
       wifi: _bleManager.connectedWifi,
-      onWifi: () => unawaited(_openWifiSetup()),
-      onAboutChild: _openAboutChild,
+      statusStalled: _wifiStatusStalled,
     );
+    final Color problem =
+        dark ? Colors.orange.shade300 : Colors.orange.shade700;
+    return SmartyCardRow(
+      icon: info.icon,
+      iconColor: info.isProblem ? problem : null,
+      label: 'Wi-Fi',
+      detail: info.detail,
+      onTap: connected ? () => unawaited(_openWifiSetup()) : null,
+      trailing: switch (info.action) {
+        WifiRowAction.setUp => TextButton(
+          onPressed: () => unawaited(_openWifiSetup()),
+          child: Text(
+            'Set up',
+            style: TextStyle(color: problem, fontWeight: FontWeight.w600),
+          ),
+        ),
+        WifiRowAction.checkAgain => IconButton(
+          icon: Icon(
+            Icons.refresh,
+            color: dark ? Colors.white70 : Colors.blue.shade700,
+          ),
+          tooltip: 'Check again',
+          onPressed: _recheckWifi,
+        ),
+        WifiRowAction.none => null,
+      },
+    );
+  }
+
+  // The Wi-Fi row's refresh (the status never came, or Smarty is still
+  // joining): back to "Checking…" and the card's spinner while we retry.
+  void _recheckWifi() {
+    setState(() => _wifiStatusStalled = false);
+    unawaited(_refreshStatus());
   }
 
   Widget _buildPrimaryButton({
@@ -619,63 +604,44 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
-  // Centered "something needs doing" layout: icon, heading, body (or
-  // [bodySteps], a numbered list), actions. Pull-to-refresh re-runs the
-  // check, and the toy card stays on top so the parent always sees which
-  // Smarty this is about.
+  // A saved toy that needs something done: the card, with the state in its
+  // header ([status]) and, in its footer, the state's icon, what to do
+  // ([body], or [bodySteps] as a numbered list), a [hint], and [actions].
   Widget _buildMessageView({
+    required ToyPhase phase,
+    required String status,
     required IconData icon,
     required Color iconColor,
-    required String heading,
     String? body,
     List<String>? bodySteps,
     String? hint,
     required List<Widget> actions,
-    bool showToyCard = true,
-    String? toyCardSubtitle,
   }) {
     final TextStyle bodyStyle = TextStyle(
       fontSize: 16,
       color: _secondaryTextColor,
     );
-    return _pullToRefresh(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (showToyCard) ...[
-            _buildToyCard(subtitle: toyCardSubtitle ?? heading),
-            SizedBox(height: 12),
-            _buildShortcuts(),
-          ],
-          SizedBox(height: 32),
-          Icon(icon, size: 56, color: iconColor),
-          SizedBox(height: 16),
+    return _buildCardView(
+      phase: phase,
+      status: status,
+      footer: [
+        Icon(icon, size: 40, color: iconColor),
+        SizedBox(height: 12),
+        if (bodySteps != null)
+          NumberedSteps(steps: bodySteps, style: bodyStyle)
+        else if (body != null)
+          Text(body, textAlign: TextAlign.center, style: bodyStyle),
+        if (hint != null) ...[
+          SizedBox(height: 8),
           Text(
-            heading,
+            hint,
             textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
-              color: _headingColor,
-            ),
+            style: TextStyle(fontSize: 14, color: _secondaryTextColor),
           ),
-          SizedBox(height: 12),
-          if (bodySteps != null)
-            NumberedSteps(steps: bodySteps, style: bodyStyle)
-          else
-            Text(body ?? '', textAlign: TextAlign.center, style: bodyStyle),
-          if (hint != null) ...[
-            SizedBox(height: 8),
-            Text(
-              hint,
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 14, color: _secondaryTextColor),
-            ),
-          ],
-          SizedBox(height: 24),
-          for (final a in actions) Center(child: a),
         ],
-      ),
+        SizedBox(height: 16),
+        for (final a in actions) Center(child: a),
+      ],
     );
   }
 
@@ -713,53 +679,43 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
-  // Probing / connecting: just the toy card with an inline spinner — nothing
+  // Probing / connecting: the card with an inline spinner — nothing
   // full-screen, nothing blocking. If it drags on, offer a visible way out
   // (pull-to-refresh alone is easy to miss).
   Widget _buildBusyView(ToyPhase phase) {
-    return _pullToRefresh(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildToyCard(
-            subtitle: toyStatusLine(_bleManager, phase: phase),
-            busy: homeToyCardBusy(
-              phase: phase,
-              pullRefreshing: _pullRefreshing,
+    return _buildCardView(
+      phase: phase,
+      status: toyStatusLine(_bleManager, phase: phase),
+      busy: homeToyCardBusy(phase: phase, pullRefreshing: _pullRefreshing),
+      footer: [
+        if (_busyLong) ...[
+          Text(
+            'This is taking longer than usual. Make sure Smarty is on and close to your phone.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 14, color: _secondaryTextColor),
+          ),
+          SizedBox(height: 8),
+          Center(
+            child: _buildTextAction(
+              'Check again',
+              () => unawaited(_refreshStatus()),
             ),
           ),
-          SizedBox(height: 12),
-          _buildShortcuts(),
-          if (_busyLong) ...[
-            SizedBox(height: 16),
-            Text(
-              'This is taking longer than usual. Make sure Smarty is on and close to your phone.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 14, color: _secondaryTextColor),
-            ),
-            SizedBox(height: 8),
-            Center(
-              child: _buildTextAction(
-                'Check again',
-                () => unawaited(_refreshStatus()),
-              ),
-            ),
-          ],
         ],
-      ),
+      ],
     );
   }
 
   Widget _buildBluetoothOffView() {
     final bool isIOS = Platform.isIOS;
     return _buildMessageView(
+      phase: ToyPhase.bluetoothOff,
+      status: 'Bluetooth is off on this phone',
       icon: Icons.bluetooth_disabled,
       iconColor: Colors.blue.shade400,
-      heading: 'Bluetooth is off',
       body: 'Turn on Bluetooth on your phone to reach Smarty',
       // iOS: "Open Settings" can only open this app's page in Settings.
       hint: isIOS ? bluetoothOffHintIOS : null,
-      toyCardSubtitle: 'Bluetooth is off on this phone',
       actions: [
         _buildPrimaryButton(
           label: isIOS ? 'Open Settings' : 'Turn on',
@@ -772,12 +728,12 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   Widget _buildNeedsPermissionView() {
     return _buildMessageView(
+      phase: ToyPhase.needsPermission,
+      status: 'Bluetooth permission needed',
       icon: Icons.bluetooth_searching,
       iconColor: Colors.blue.shade400,
-      heading: 'Allow Bluetooth',
       body: 'Allow Bluetooth so the app can talk to Smarty',
       hint: 'In Settings, turn on Bluetooth for this app, then come back.',
-      toyCardSubtitle: 'Bluetooth permission needed',
       actions: [
         _buildPrimaryButton(
           label: 'Open Settings',
@@ -794,30 +750,19 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   // look DID just see the toy (the connect hasn't happened yet, or failed and
   // will be retried), say it's on and connecting instead.
   Widget _buildNotNearbyView() {
-    if (_bleManager.savedToySeenRecently) {
-      return _buildMessageView(
-        icon: Icons.bluetooth_searching,
-        iconColor: Colors.blue.shade400,
-        heading: 'Smarty is on — connecting…',
-        body: "Keep it close to your phone. It'll connect by itself.",
-        toyCardSubtitle: 'On — connecting…',
-        actions: [
-          _buildPrimaryButton(
-            label: 'Check again',
-            icon: Icons.refresh,
-            onPressed: () => unawaited(_bleManager.watchSavedToy()),
-          ),
-          SizedBox(height: 12),
-          _buildTextAction('Set up a different Smarty', _openConnectionPage),
-        ],
-      );
-    }
+    final bool seen = _bleManager.savedToySeenRecently;
     return _buildMessageView(
-      icon: Icons.bedtime_outlined,
-      iconColor: Colors.indigo.shade300,
-      heading: 'Smarty is asleep or out of reach',
-      body: "Turn it on — it'll connect by itself.",
-      toyCardSubtitle: 'Asleep or out of reach',
+      phase: ToyPhase.notNearby,
+      status:
+          seen
+              ? 'Smarty is on — connecting…'
+              : 'Smarty is asleep or out of reach',
+      icon: seen ? Icons.bluetooth_searching : Icons.bedtime_outlined,
+      iconColor: seen ? Colors.blue.shade400 : Colors.indigo.shade300,
+      body:
+          seen
+              ? "Keep it close to your phone. It'll connect by itself."
+              : "Turn it on — it'll connect by itself.",
       actions: [
         _buildPrimaryButton(
           label: 'Check again',
@@ -833,11 +778,11 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   Widget _buildPairingBrokenView() {
     final bool isIOS = Platform.isIOS;
     return _buildMessageView(
+      phase: ToyPhase.pairingBroken,
+      status: pairingBrokenHeading,
       icon: Icons.link_off,
       iconColor: Colors.orange.shade400,
-      heading: pairingBrokenHeading,
       bodySteps: pairingBrokenStepList(isIOS: isIOS),
-      toyCardSubtitle: 'Needs reconnecting',
       actions: [
         // Opens setup, not just another quick look: after the button hold
         // the toy only waits a couple of minutes, and the setup page keeps looking
@@ -864,185 +809,40 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         !_waitingForStatus &&
         _bleManager.registered == false;
 
-    return _pullToRefresh(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildToyCard(
-            subtitle: toyStatusLine(
-              _bleManager,
-              statusStalled: _wifiStatusStalled,
-              phase: ToyPhase.connected,
-            ),
-            // No spinner once the advert has already told us "not on
-            // Wi-Fi", nor during a pull (its own spinner shows).
-            busy: homeToyCardBusy(
-              phase: ToyPhase.connected,
-              waitingForStatus: _waitingForStatus,
-              statusStalled: _wifiStatusStalled,
-              advertSaysNoWifi:
-                  _bleManager.savedToySeenRecently &&
-                  _bleManager.lastSeenAdvert?.wifiUp == false,
-              pullRefreshing: _pullRefreshing,
-            ),
-          ),
-          const LiveChatBanner(), // "Smarty is talking with your child — tap to watch"
-          if (needsLinkStep) ...[
-            SizedBox(height: 16),
-            Center(
-              child: _buildPrimaryButton(
-                label: 'Finish setup',
-                icon: Icons.check_circle_outline,
-                onPressed: _openConnectionPage,
-              ),
-            ),
-          ],
-          SizedBox(height: 20),
-          _buildWifiStatusCard(),
-          SizedBox(height: 12),
-          _buildShortcuts(),
-          // NOTE: battery status card intentionally omitted — the device has no
-          // battery sensing yet (firmware returns a fixed placeholder), so showing
-          // a precise "%" would mislead parents (APP-7 / FW-21). Restore this card
-          // once real battery telemetry exists.
-        ],
+    return _buildCardView(
+      phase: ToyPhase.connected,
+      status: toyStatusLine(
+        _bleManager,
+        statusStalled: _wifiStatusStalled,
+        phase: ToyPhase.connected,
       ),
-    );
-  }
-
-  // States: couldn't-check (stalled, offers retry), still-loading, joining,
-  // connected, and not-on-Wi-Fi (offers a setup shortcut).
-  Widget _buildWifiStatusCard() {
-    final String wifi = _bleManager.connectedWifi.trim();
-
-    if (_wifiStatusStalled) {
-      return _buildStatusCard(
-        icon: Icons.wifi_find,
-        color: Colors.orange,
-        title: "Couldn't check Wi-Fi",
-        isLoading: false,
-        trailing: IconButton(
-          icon: Icon(Icons.refresh, color: Colors.orange.shade700),
-          tooltip: 'Refresh',
-          onPressed: () {
-            setState(() {
-              _wifiStatusStalled =
-                  false; // show the spinner again while we retry
-            });
-            _refreshStatus();
-          },
-        ),
-      );
-    }
-
-    // During a pull the cards keep their text but not their spinners.
-    if (_waitingForStatus) {
-      return _buildStatusCard(
-        icon: Icons.wifi_find,
-        color: Colors.orange,
-        title: 'Checking Wi-Fi…',
-        isLoading: !_pullRefreshing,
-      );
-    }
-
-    if (wifi == 'Initializing' || wifi == 'Reconnecting') {
-      // Joining can legitimately take a while (the toy retries for ~45 s),
-      // and BleManager keeps re-reading meanwhile — but never leave a bare
-      // spinner: offer a manual re-check too.
-      return _buildStatusCard(
-        icon: Icons.wifi_find,
-        color: Colors.blue,
-        title: 'Joining Wi-Fi…',
-        isLoading: !_pullRefreshing,
-        trailing: IconButton(
-          icon: Icon(Icons.refresh, color: Colors.blue.shade700),
-          tooltip: 'Check again',
-          onPressed: () => unawaited(_refreshStatus()),
-        ),
-      );
-    }
-
-    if (_bleManager.isWifiConnected) {
-      return _buildStatusCard(
-        icon: Icons.wifi,
-        color: Colors.green,
-        title: 'Wi-Fi: $wifi',
-        isLoading: false,
-      );
-    }
-
-    return _buildStatusCard(
-      icon: Icons.wifi_off,
-      color: Colors.orange,
-      title: switch (wifi) {
-        'Auth Failed' => 'Wi-Fi password may have changed',
-        'Connection Failed' => "Can't reach Wi-Fi",
-        'No credentials' => 'Wi-Fi not set up yet',
-        _ => 'Wi-Fi: Not connected',
-      },
-      isLoading: false,
-      trailing: TextButton(
-        onPressed: _openWifiSetup,
-        child: Text(
-          'Set up',
-          style: TextStyle(
-            color: Colors.orange.shade700,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
+      // No spinner once the advert has already told us "not on Wi-Fi", nor
+      // during a pull (its own spinner shows).
+      busy: homeToyCardBusy(
+        phase: ToyPhase.connected,
+        waitingForStatus: _waitingForStatus,
+        statusStalled: _wifiStatusStalled,
+        advertSaysNoWifi:
+            _bleManager.savedToySeenRecently &&
+            _bleManager.lastSeenAdvert?.wifiUp == false,
+        pullRefreshing: _pullRefreshing,
       ),
-    );
-  }
-
-  Widget _buildStatusCard({
-    IconData? icon,
-    required Color color,
-    required String title,
-    required bool isLoading,
-    Widget? trailing,
-  }) {
-    return Container(
-      padding: EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color:
-                Theme.of(context).brightness == Brightness.dark
-                    ? Colors.black26
-                    : Colors.grey.shade200,
-            blurRadius: 6,
-            offset: Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          isLoading
-              ? SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation<Color>(color),
-                ),
-              )
-              : Icon(icon, color: color, size: 20),
-          SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              title,
-              style: TextStyle(
-                fontSize: 14,
-                color: _headingColor,
-                fontWeight: FontWeight.w500,
-              ),
+      footer: [
+        if (needsLinkStep)
+          Center(
+            child: _buildPrimaryButton(
+              label: 'Finish setup',
+              icon: Icons.check_circle_outline,
+              onPressed: _openConnectionPage,
             ),
           ),
-          if (trailing != null) trailing,
-        ],
-      ),
+      ],
+      // "Smarty is talking with your child — tap to watch", only while live.
+      below: const [LiveChatBanner()],
+      // NOTE: battery status intentionally omitted — the device has no
+      // battery sensing yet (firmware returns a fixed placeholder), so showing
+      // a precise "%" would mislead parents (APP-7 / FW-21). Add it to the
+      // card once real battery telemetry exists.
     );
   }
 

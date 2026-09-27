@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../models/conversation.dart';
-import '../../services/convos_service.dart';
-import 'convos_widgets.dart';
+import '../../services/conversations_service.dart';
+import 'conversations_widgets.dart';
 
 /// A whole day as one continuous chat, live: the child's words on the right,
 /// Smarty's replies on the left, a reply growing sentence by sentence while
@@ -19,7 +19,7 @@ class DayChatPage extends StatefulWidget {
 
   /// "YYYY-MM-DD".
   final String day;
-  final ConvosSource? source;
+  final ConversationsSource? source;
 
   const DayChatPage({
     super.key,
@@ -33,7 +33,8 @@ class DayChatPage extends StatefulWidget {
 }
 
 class _DayChatPageState extends State<DayChatPage> {
-  late final ConvosSource _source = widget.source ?? ConvosService();
+  late final ConversationsSource _source =
+      widget.source ?? ConversationsService();
   final ScrollController _scroll = ScrollController();
 
   StreamSubscription<List<Conversation>>? _sessionsSub;
@@ -79,7 +80,7 @@ class _DayChatPageState extends State<DayChatPage> {
   }
 
   void _onError(Object e) {
-    debugPrint('Convos: day chat listener error: $e');
+    debugPrint('Conversations: day chat listener error: $e');
     if (!mounted) return;
     _cancelAll();
     setState(() => _error = e);
@@ -170,9 +171,9 @@ class _DayChatPageState extends State<DayChatPage> {
   Widget _body(BuildContext context) {
     final error = _error;
     if (error != null) {
-      return convosNeedsSignIn(error)
-          ? ConvosMessage.signIn(context)
-          : ConvosMessage.failed(onRetry: _retry);
+      return conversationsNeedSignIn(error)
+          ? ConversationsMessage.signIn(context)
+          : ConversationsMessage.failed(onRetry: _retry);
     }
     final sessions = _sessions;
     if (sessions == null ||
@@ -180,7 +181,7 @@ class _DayChatPageState extends State<DayChatPage> {
       return const Center(child: CircularProgressIndicator());
     }
     if (_items.isEmpty) {
-      return const ConvosMessage(
+      return const ConversationsMessage(
         icon: Icons.forum_outlined,
         message: 'No chats on this day.',
       );

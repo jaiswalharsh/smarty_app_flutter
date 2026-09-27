@@ -90,15 +90,15 @@ Future<void> signInAgain(BuildContext context) async {
 }
 
 /// Centered icon + title + message, with an optional action — the empty,
-/// sign-in and "couldn't load" states of the Convos screens.
-class ConvosMessage extends StatelessWidget {
+/// sign-in and "couldn't load" states of the Conversations screens.
+class ConversationsMessage extends StatelessWidget {
   final IconData icon;
   final String? title;
   final String message;
   final String? actionLabel;
   final VoidCallback? onAction;
 
-  const ConvosMessage({
+  const ConversationsMessage({
     super.key,
     required this.icon,
     this.title,
@@ -108,7 +108,8 @@ class ConvosMessage extends StatelessWidget {
   });
 
   /// "Please sign in again", with a button that does it.
-  factory ConvosMessage.signIn(BuildContext context) => ConvosMessage(
+  factory ConversationsMessage.signIn(BuildContext context) =>
+      ConversationsMessage(
         icon: Icons.lock_outline_rounded,
         title: 'Please sign in again',
         message: "Sign in to see your child's chats with Smarty.",
@@ -117,8 +118,8 @@ class ConvosMessage extends StatelessWidget {
       );
 
   /// Anything else that went wrong: plain words and a retry.
-  factory ConvosMessage.failed({required VoidCallback onRetry}) =>
-      ConvosMessage(
+  factory ConversationsMessage.failed({required VoidCallback onRetry}) =>
+      ConversationsMessage(
         icon: Icons.cloud_off_rounded,
         title: "Couldn't load chats",
         message: 'Check your internet connection and try again.',
