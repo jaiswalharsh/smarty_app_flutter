@@ -410,4 +410,88 @@ void main() {
           isFalse);
     });
   });
+
+  group('BleManager.isStaleBondEvidence', () {
+    bool stale(Object? e, [DisconnectReason? r]) =>
+        BleManager.isStaleBondEvidence(e, r);
+
+    test('iOS "peer removed pairing information" (connect error 14) — this '
+        "phone's pairing is stale", () {
+      expect(
+          stale(FlutterBluePlusException(ErrorPlatform.apple, 'connect', 14,
+              'Peer removed pairing information')),
+          isTrue);
+      expect(stale(Exception('Peer removed pairing information')), isTrue);
+      expect(stale(null, DisconnectReason(ErrorPlatform.apple, 14, null)),
+          isTrue);
+    });
+
+    test('Android: our keys rejected (HCI 6 / 0x3D, PIN_OR_KEY_MISSING)', () {
+      for (final code in [0x06, 0x3D]) {
+        expect(
+            stale(FlutterBluePlusException(
+                ErrorPlatform.android, 'connect', code, 'hci')),
+            isTrue,
+            reason: 'HCI $code');
+        expect(stale(null, DisconnectReason(ErrorPlatform.android, code, null)),
+            isTrue,
+            reason: 'reason $code');
+      }
+      expect(
+          stale(PlatformException(
+              code: 'connect', message: 'GATT_PIN_OR_KEY_MISSING')),
+          isTrue);
+    });
+
+    test('a refused NEW pairing is not a stale one (a toy set up with '
+        'another phone looks like this)', () {
+      // ATT insufficient authentication / encryption on the first subscribe.
+      for (final code in [5, 8, 15]) {
+        expect(
+            stale(FlutterBluePlusException(ErrorPlatform.apple,
+                'setNotifyValue', code, 'Authentication is insufficient.')),
+            isFalse,
+            reason: 'ATT $code');
+        expect(
+            stale(FlutterBluePlusException(ErrorPlatform.android,
+                'setNotifyValue', code, 'GATT_INSUFFICIENT_AUTHENTICATION')),
+            isFalse,
+            reason: 'GATT $code');
+      }
+      // Android HCI 5 (authentication failure): the toy's stack ends a
+      // refused new pairing with it too.
+      expect(
+          stale(FlutterBluePlusException(
+              ErrorPlatform.android, 'connect', 0x05, 'hci')),
+          isFalse);
+      expect(stale(null, DisconnectReason(ErrorPlatform.android, 0x05, null)),
+          isFalse);
+      // iOS encryption timed out (15): could be either.
+      expect(
+          stale(FlutterBluePlusException(
+              ErrorPlatform.apple, 'connect', 15, 'Encryption timed out')),
+          isFalse);
+      // A link that simply dropped.
+      expect(stale(StateError('Link dropped during setup'),
+              DisconnectReason(ErrorPlatform.apple, 7, 'disconnected')),
+          isFalse);
+      expect(stale(null, DisconnectReason(ErrorPlatform.android, 0x13,
+              'REMOTE_USER_TERMINATED_CONNECTION')),
+          isFalse);
+      expect(stale(null), isFalse);
+    });
+
+    test('ConnectException carries it (off by default)', () {
+      const plain = ConnectException(ConnectFailure.pairingBroken);
+      expect(plain.staleBond, isFalse);
+      expect(stale(plain), isFalse);
+      const marked = ConnectException(ConnectFailure.pairingBroken, null, true);
+      expect(marked.staleBond, isTrue);
+      expect(stale(marked), isTrue);
+      expect(
+          stale(ConnectException(ConnectFailure.pairingBroken,
+              Exception('Peer removed pairing information'))),
+          isTrue);
+    });
+  });
 }

@@ -97,10 +97,20 @@ enum ConnectFailure {
 class ConnectException implements Exception {
   final ConnectFailure kind;
   final Object? cause;
-  const ConnectException(this.kind, [this.cause]);
+
+  /// For [ConnectFailure.pairingBroken]: the phone's Bluetooth said outright
+  /// that the toy has dropped THIS phone's stored pairing (see
+  /// [BleManager.isStaleBondEvidence]) — the parent should forget the old
+  /// pairing. false = the pairing was refused without saying so, e.g. a toy
+  /// set up with another phone that isn't waiting to pair.
+  final bool staleBond;
+
+  const ConnectException(this.kind, [this.cause, this.staleBond = false]);
 
   @override
-  String toString() => 'ConnectException(${kind.name}): $cause';
+  String toString() =>
+      'ConnectException(${kind.name}${staleBond ? ', stale pairing' : ''}): '
+      '$cause';
 }
 
 /// What one link drop means for the stale-pairing check. See
@@ -1184,9 +1194,17 @@ class BleManager {
       _startStatusPoll();
     } catch (e) {
       // Classify BEFORE our own disconnect overwrites the disconnect reason.
-      ConnectException failure = e is ConnectException
-          ? e
-          : ConnectException(_classifyForDevice(e, device), e);
+      final DisconnectReason? reason =
+          device.isDisconnected ? device.disconnectReason : null;
+      final bool staleBond = isStaleBondEvidence(e, reason);
+      ConnectException failure;
+      if (e is ConnectException) {
+        failure = e;
+      } else {
+        final kind = _classifyForDevice(e, device);
+        failure = ConnectException(
+            kind, e, kind == ConnectFailure.pairingBroken && staleBond);
+      }
       debugPrint("❌ BleManager: initialize failed (${failure.kind.name}): $e");
       // Reset FIRST so the intentional disconnect below can't fire the
       // disconnect handler, then drop the link so a half-initialized device
@@ -1203,7 +1221,7 @@ class BleManager {
       if (failure.kind != ConnectFailure.pairingBroken &&
           failure.kind != ConnectFailure.cancelledByUser &&
           _needsRepairFor(device)) {
-        failure = ConnectException(ConnectFailure.pairingBroken, e);
+        failure = ConnectException(ConnectFailure.pairingBroken, e, staleBond);
       }
       if (_armedDevice == device) {
         _pendingSub?.cancel();
@@ -2432,7 +2450,11 @@ class BleManager {
           // forgetToy()/disconnectAndReset() cancelled this connect.
           throw ConnectException(ConnectFailure.cancelledByUser, e);
         }
-        final failure = ConnectException(_classifyForDevice(e, device), e);
+        final DisconnectReason? reason = device.disconnectReason;
+        final kind = _classifyForDevice(e, device);
+        final failure = ConnectException(kind, e,
+            kind == ConnectFailure.pairingBroken &&
+                isStaleBondEvidence(e, reason));
         debugPrint("❌ BleManager: connect failed (${failure.kind.name}): $e");
         await _onConnectFailure(device, failure);
         throw failure;
@@ -2926,6 +2948,54 @@ class BleManager {
     }
     final desc = reason.description?.toLowerCase() ?? '';
     return desc.isNotEmpty && _hasPairingMarker(desc);
+  }
+
+  /// Whether a failed attempt's [error] (or the link's disconnect [reason])
+  /// says outright that the toy has dropped the pairing THIS phone holds —
+  /// as opposed to refusing a new pairing (a toy set up with another phone
+  /// that isn't waiting to pair). Pure; see [ConnectException.staleBond].
+  ///
+  /// - iOS: CBError 14 "Peer removed pairing information" (connect error or
+  ///   disconnect reason). Not "insufficient authentication / encryption"
+  ///   (ATT 5 / 15) or CBError 15: a refused new pairing looks the same.
+  /// - Android: HCI 0x06 PIN_OR_KEY_MISSING, 0x3D MIC failure — the toy
+  ///   rejected keys this phone already has. Not 0x05 AUTHENTICATION_FAILURE:
+  ///   the toy's stack also ends a refused new pairing with it.
+  /// - Any text that says so ("peer removed pairing", "pairing
+  ///   information", "pin or key missing", "key missing").
+  @visibleForTesting
+  static bool isStaleBondEvidence(Object? error, [DisconnectReason? reason]) {
+    bool staleCode(ErrorPlatform platform, int? code) =>
+        (platform == ErrorPlatform.apple && code == 14) ||
+        (platform == ErrorPlatform.android && (code == 0x06 || code == 0x3D));
+    bool staleText(String? text) {
+      final lower = (text ?? '').toLowerCase();
+      return lower.contains('peer removed pairing') ||
+          lower.contains('pairing information') ||
+          lower.contains('pin_or_key_missing') ||
+          lower.contains('pin or key missing') ||
+          lower.contains('key missing');
+    }
+
+    if (reason != null &&
+        (staleCode(reason.platform, reason.code) ||
+            staleText(reason.description))) {
+      return true;
+    }
+    if (error == null) return false;
+    if (error is ConnectException) {
+      return error.staleBond || isStaleBondEvidence(error.cause);
+    }
+    if (error is FlutterBluePlusException &&
+        error.function == 'connect' &&
+        staleCode(error.platform, error.code)) {
+      return true;
+    }
+    if (error is PlatformException) {
+      return staleText('${error.code} ${error.message ?? ''} '
+          '${error.details ?? ''}');
+    }
+    return staleText(error.toString());
   }
 
   /// Map any BLE error to a [ConnectFailure]. Pure; exposed so the setup page

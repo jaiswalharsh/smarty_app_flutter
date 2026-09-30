@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/conversation.dart';
 import 'ble_manager.dart';
+import 'known_toys_service.dart' show isReleasedRecord;
 
 /// The parent is signed out (or the session is no longer accepted): the UI
 /// shows a sign-in prompt instead of an error. See [conversationsNeedSignIn].
@@ -22,6 +23,39 @@ bool conversationsNeedSignIn(Object? error) {
         error.code == 'unauthenticated';
   }
   return false;
+}
+
+/// The toy whose chats the Conversations tab shows, from the account's
+/// `parents/{uid}/devices` [records] (id, fields). Pure. In order:
+/// 1. the toy saved on this phone ([savedToyDeviceId], once read over
+///    Bluetooth) when it is on the account and not released;
+/// 2. else the most recently linked toy that isn't released
+///    (`registered_at`, newest first);
+/// 3. else — only toys the parent removed while keeping their chats
+///    ([isReleasedRecord]) — the most recently removed one (`released_at`),
+///    so those chats stay readable after "I don't have this Smarty any more".
+/// null when there are no records.
+String? pickConversationsToy(
+  List<(String, Map<String, dynamic>)> records, {
+  String? savedToyDeviceId,
+}) {
+  if (records.isEmpty) return null;
+  final live = [for (final r in records) if (!isReleasedRecord(r.$2)) r];
+  if (savedToyDeviceId != null && live.any((r) => r.$1 == savedToyDeviceId)) {
+    return savedToyDeviceId;
+  }
+  final bool linked = live.isNotEmpty;
+  final String field = linked ? 'registered_at' : 'released_at';
+  final List<(String, Map<String, dynamic>)> pool =
+      (linked ? live : records).toList()
+        ..sort((a, b) {
+          final ta = a.$2[field], tb = b.$2[field];
+          if (ta is Timestamp && tb is Timestamp) return tb.compareTo(ta);
+          if (ta is Timestamp) return -1;
+          if (tb is Timestamp) return 1;
+          return a.$1.compareTo(b.$1);
+        });
+  return pool.first.$1;
 }
 
 /// What the Conversations screens read. [ConversationsService] reads
@@ -81,25 +115,21 @@ class ConversationsService implements ConversationsSource {
 
   /// The saved toy's own id when it has been read over Bluetooth this
   /// session and is linked to this account; otherwise the most recently
-  /// linked toy on the account.
+  /// linked toy on the account; otherwise (only removed toys whose chats were
+  /// kept) the most recently removed one. See [pickConversationsToy].
   @override
   Future<String?> resolveDeviceId() async {
     final devices = _devices();
     final snap = await devices.get();
-    if (snap.docs.isEmpty) return null;
-    final String? ble = BleManager().savedToyDeviceId;
-    if (ble != null && snap.docs.any((d) => d.id == ble)) return ble;
-    final docs = snap.docs.toList()
-      ..sort((a, b) {
-        final ta = a.data()['registered_at'], tb = b.data()['registered_at'];
-        if (ta is Timestamp && tb is Timestamp) return tb.compareTo(ta);
-        if (ta is Timestamp) return -1;
-        if (tb is Timestamp) return 1;
-        return a.id.compareTo(b.id);
-      });
-    debugPrint('Conversations: showing toy ${docs.first.id} '
-        '(${snap.docs.length} on the account)');
-    return docs.first.id;
+    final String? id = pickConversationsToy(
+      [for (final d in snap.docs) (d.id, d.data())],
+      savedToyDeviceId: BleManager().savedToyDeviceId,
+    );
+    if (id != null) {
+      debugPrint('Conversations: showing toy $id '
+          '(${snap.docs.length} on the account)');
+    }
+    return id;
   }
 
   @override

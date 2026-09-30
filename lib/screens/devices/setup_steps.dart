@@ -1,55 +1,151 @@
 // Pure decision helpers for the "Set up Smarty" page, kept free of Flutter
 // widgets and BLE so they can be unit-tested.
 
+import 'package:flutter/foundation.dart' show immutable;
+
 import '../../services/ble_manager.dart';
 
 // ---- Toy timing (firmware: bt_setup.c) ---------------------------------------
 
-/// How long a toy waits for a phone after the + and – buttons are held.
+/// How long a toy waits for a phone after the + and – buttons are held. (A
+/// toy that has never been paired waits for as long as it is on.)
 const Duration pairingWindow = Duration(minutes: 2);
 
-/// How long a toy that has never been paired waits for a phone after it is
-/// first switched on (no button hold needed).
-const Duration firstBootPairingWindow = Duration(minutes: 5);
-
-/// The "Smarty found!" beat before connecting to a lone toy by itself.
+/// The "Smarty found!" beat before connecting to a toy by ourselves.
 const Duration autoSelectDelay = Duration(milliseconds: 600);
+
+// ---- What the page is for -------------------------------------------------
+
+/// Why the setup page was opened (Home picks it).
+enum SetupMode {
+  /// "Set up Smarty" / "Try again" / "Finish setup": the one toy of this
+  /// account in the list, else a lone toy that is waiting to pair, is
+  /// connected by itself.
+  setUp,
+
+  /// "Reconnect your Smarty" → Connect: bring back a toy this account set up
+  /// before (a fresh install, or a new phone). That toy is connected by
+  /// itself as soon as it shows up.
+  reconnect,
+
+  /// "Set up a different Smarty": the account's own toys are still listed
+  /// ("Your Smarty") but never connected by themselves.
+  newToy,
+}
 
 // ---- Instructions -------------------------------------------------------------
 
 /// Instructions card, first line: a brand-new toy is ready by itself.
-final String setupFirstBootLine =
-    'Just unboxed? Turn Smarty on — it\'s ready '
-    'to pair for the first ${firstBootPairingWindow.inMinutes} minutes.';
+const String setupFirstBootLine =
+    "Just unboxed? Turn Smarty on — it's ready to pair.";
 
 /// Instructions card, second line: every other case (the button hold).
 final String setupButtonHoldLine =
-    'Otherwise, turn Smarty on and hold the '
-    '+ and – buttons together for 3 seconds. Smarty will wait '
-    '${pairingWindow.inMinutes} minutes for your phone.';
+    'Otherwise hold the + and – buttons together for 3 seconds. Smarty will '
+    'wait ${pairingWindow.inMinutes} minutes for your phone.';
+
+/// Instructions card when reconnecting ([SetupMode.reconnect]), first line.
+const String reconnectFirstLine =
+    'Turn Smarty on and keep it close to your phone.';
+
+/// Instructions card when reconnecting, second line: a phone Smarty doesn't
+/// know yet needs the button hold.
+const String reconnectButtonHoldLine =
+    'New phone? Also hold the + and – buttons together for 3 seconds.';
 
 // ---- Which toys to offer ------------------------------------------------------
 
-/// Whether a toy seen while looking belongs in the list. Only a toy that
-/// says it is NOT waiting to pair is left out (it's set up with another
-/// phone, or already set up); toys whose firmware says nothing ([advert]
-/// null) are listed as always.
+/// Whether a toy that isn't this account's belongs in the main list. Only a
+/// toy that says it is NOT waiting to pair is left out (it goes under
+/// "Other Smarty toys nearby" — see [toyListingFor]); toys whose firmware
+/// says nothing ([advert] null) are listed as always.
 bool isSetupCandidate(ToyAdvert? advert) => advert?.pairing != false;
 
-/// Whether to connect by ourselves (after [autoSelectDelay]) instead of
-/// waiting for a tap: only when exactly one toy is listed AND it says it is
-/// waiting to pair. Never for firmware that doesn't say (no advert data, or
-/// a version-0 advert) — such a toy could be a neighbour's Smarty bonded to
-/// their phone.
+/// Where a toy seen while looking goes on the page.
+enum ToyListing {
+  /// This account's toy (its name matches a toy linked to the account, or it
+  /// is the toy saved on this phone): "Your Smarty" + its code, in the main
+  /// list whatever it says about pairing — it may already know this phone.
+  yours,
+
+  /// A toy to set up: "Smarty" + its code, in the main list.
+  candidate,
+
+  /// Says it isn't waiting to pair and isn't this account's: greyed, under
+  /// "Other Smarty toys nearby" (tapping still tries — it may know this
+  /// phone from another account).
+  other,
+}
+
+/// [ToyListing] for a toy with [advert] ([yours]: it is this account's).
+ToyListing toyListingFor(ToyAdvert? advert, {required bool yours}) {
+  if (yours) return ToyListing.yours;
+  return isSetupCandidate(advert) ? ToyListing.candidate : ToyListing.other;
+}
+
+/// Subtitle of a toy under "Other Smarty toys nearby".
+const String otherToySubtitle =
+    'Set up with another phone — hold + and – on it to pair';
+
+/// Heading over the toys that aren't waiting to pair.
+const String otherToysHeading = 'Other Smarty toys nearby';
+
+/// Whether to connect to a lone toy by ourselves on its advert alone: only
+/// when exactly one is offered AND it says it is waiting to pair. Never for
+/// firmware that doesn't say (no advert data, or a version-0 advert) — such
+/// a toy could be a neighbour's Smarty bonded to their phone.
 bool shouldAutoSelect(List<ToyAdvert?> candidates) {
   if (candidates.length != 1) return false;
   final advert = candidates.single;
   return advert != null && !advert.isLegacy && advert.pairing == true;
 }
 
+/// One toy in the main list, for [autoSelectIndex]: its advert, whether it
+/// is this account's ([yours]), and whether it is the toy being reconnected
+/// ([target]).
+typedef ListedToy = ({ToyAdvert? advert, bool yours, bool target});
+
+/// Which toy in the main list ([listed], in order) to connect by ourselves
+/// after [autoSelectDelay], or null to wait for a tap. Pure.
+///
+/// - [SetupMode.reconnect]: the toy being reconnected, when exactly one
+///   listed toy is it — whatever else is around.
+/// - [SetupMode.setUp]: the account's toy when exactly one listed toy is
+///   (the name matched the account, and the toy's own id is checked once
+///   connected — so a neighbour's toy around doesn't make it ambiguous);
+///   otherwise [shouldAutoSelect] over the whole list.
+/// - [SetupMode.newToy]: the account's own toys are left out; then
+///   [shouldAutoSelect] over the rest.
+int? autoSelectIndex(List<ListedToy> listed, {required SetupMode mode}) {
+  switch (mode) {
+    case SetupMode.reconnect:
+      final targets = [
+        for (var i = 0; i < listed.length; i++)
+          if (listed[i].target) i,
+      ];
+      return targets.length == 1 ? targets.single : null;
+    case SetupMode.setUp:
+      final mine = [
+        for (var i = 0; i < listed.length; i++)
+          if (listed[i].yours) i,
+      ];
+      if (mine.length == 1) return mine.single;
+      return shouldAutoSelect([for (final t in listed) t.advert]) ? 0 : null;
+    case SetupMode.newToy:
+      final others = [
+        for (var i = 0; i < listed.length; i++)
+          if (!listed[i].yours) i,
+      ];
+      return shouldAutoSelect([for (final i in others) listed[i].advert])
+          ? others.single
+          : null;
+  }
+}
+
 // ---- Hints --------------------------------------------------------------------
 
-/// Hint shown under the live toy list while nothing has been picked yet.
+/// Hint (text only — never a button) shown while the look is running and
+/// nothing has been listed yet.
 enum ScanHint {
   /// Just started looking — the instructions card is enough.
   none,
@@ -57,12 +153,13 @@ enum ScanHint {
   /// ~10 s with nothing found: "Still looking — did you hold both buttons?"
   stillLooking,
 
-  /// ~10 s and the only toys around say they aren't waiting to pair.
-  notReadyToPair,
-
   /// [pairingWindow] has passed: the toy's wait is over; ask for the buttons
   /// again.
   stoppedWaiting,
+
+  /// ~10 s with nothing found while reconnecting ([SetupMode.reconnect]): a
+  /// toy that knows this phone only needs to be on and close.
+  stillLookingForYours,
 }
 
 /// After this long with no toy, nudge the parent.
@@ -71,18 +168,25 @@ const Duration scanStillLookingAfter = Duration(seconds: 10);
 /// After this long with no toy, the toy's wait ([pairingWindow]) is over.
 const Duration scanStoppedWaitingAfter = pairingWindow;
 
+/// While reconnecting ([SetupMode.reconnect]), after this long without the
+/// toy the page also offers "Set up a different Smarty" and "I don't have
+/// this Smarty any more".
+const Duration reconnectWayOutAfter = Duration(seconds: 30);
+
 /// Which hint to show [elapsed] after the parent started (or restarted)
-/// looking, given whether any toy is listed yet and whether a toy was seen
-/// that isn't waiting to pair ([seenNotPairing] — it is not listed).
+/// looking. [anyListed]: a toy is in the main list (its tile says what to
+/// do). [othersNearby]: toys that aren't waiting to pair are shown under
+/// "Other Smarty toys nearby" — their subtitle already says to hold the
+/// buttons, so no hint repeats it. [reconnect]: [SetupMode.reconnect].
 ScanHint scanHintFor(
   Duration elapsed, {
-  required bool anyFound,
-  bool seenNotPairing = false,
+  required bool anyListed,
+  bool othersNearby = false,
+  bool reconnect = false,
 }) {
-  if (anyFound) return ScanHint.none;
+  if (anyListed || othersNearby) return ScanHint.none;
   if (elapsed < scanStillLookingAfter) return ScanHint.none;
-  // A toy we can see beats a guess: tell the parent exactly what to do.
-  if (seenNotPairing) return ScanHint.notReadyToPair;
+  if (reconnect) return ScanHint.stillLookingForYours;
   if (elapsed >= scanStoppedWaitingAfter) return ScanHint.stoppedWaiting;
   return ScanHint.stillLooking;
 }
@@ -91,12 +195,130 @@ ScanHint scanHintFor(
 String? scanHintText(ScanHint hint) => switch (hint) {
   ScanHint.none => null,
   ScanHint.stillLooking => 'Still looking — did you hold both buttons?',
-  ScanHint.notReadyToPair =>
-    "We can see a Smarty, but it isn't ready to pair. Hold the + and – "
-        'buttons on it for 3 seconds.',
   ScanHint.stoppedWaiting =>
     'Smarty stopped waiting. Hold the + and – buttons again.',
+  ScanHint.stillLookingForYours =>
+    'Still looking — make sure Smarty is on and close to your phone.',
 };
+
+/// What leads the "looking" part of the page: [spinner] (still looking /
+/// connecting), [found] (a check mark), or neither (the look has stopped).
+enum LookIcon { spinner, found, none }
+
+/// The "looking" part of the setup page for one state: a header (with its
+/// [icon]) and optional [subtitle] above the toy list, then a [hint] line
+/// (orange when [hintIsWarning]) and the "Look again" button
+/// ([showLookAgain]) below it. See [lookSectionView].
+@immutable
+class LookSectionView {
+  const LookSectionView({
+    required this.header,
+    required this.icon,
+    this.subtitle,
+    this.hint,
+    this.hintIsWarning = false,
+    this.showLookAgain = false,
+  });
+
+  final String header;
+  final LookIcon icon;
+  final String? subtitle;
+  final String? hint;
+  final bool hintIsWarning;
+  final bool showLookAgain;
+
+  /// Every line of text it shows, header first (for tests).
+  List<String> get texts => [
+    header,
+    if (subtitle != null) subtitle!,
+    if (hint != null) hint!,
+    if (showLookAgain) 'Look again',
+  ];
+
+  @override
+  String toString() => 'LookSectionView($texts, $icon)';
+}
+
+/// The "looking" part of the setup page (pure). One rule: while the look is
+/// running there is NO "Look again" button — hints are text only. The button
+/// appears only once the look has actually stopped ([scanStopped]: it
+/// failed and isn't retrying by itself). Connect failures, a lost link and
+/// the Bluetooth states are separate views with their own buttons.
+///
+/// | state                      | header                   | hint              | button     |
+/// |----------------------------|--------------------------|-------------------|------------|
+/// | connecting                 | Connecting to Smarty… ⟳  | —                 | —          |
+/// | looking, nothing, < 10 s   | Looking for Smarty… ⟳    | —                 | —          |
+/// | looking, nothing, 10–120 s | Looking for Smarty… ⟳    | Still looking — … | —          |
+/// | looking, nothing, ≥ 120 s  | Looking for Smarty… ⟳    | Smarty stopped …  | —          |
+/// | looking, only others       | Looking for Smarty… ⟳    | — (tiles say it)  | —          |
+/// | looking, one listed        | Smarty found! ✓          | —                 | —          |
+/// | looking, several listed    | Smarty toys nearby       | —                 | —          |
+/// | stopped, nothing listed    | Stopped looking for Smarty | Something got in the way on this phone. | Look again |
+/// | stopped, toys listed       | (as above for the toys)  | Stopped looking for more toys. | Look again |
+///
+/// When reconnecting ([reconnect]) "Smarty" in the looking/connecting
+/// headers reads "your Smarty", and several listed toys say "Tap your
+/// Smarty." instead of "Tap the one you are setting up.".
+LookSectionView lookSectionView({
+  required bool connecting,
+  required int listed,
+  required bool scanStopped,
+  ScanHint hint = ScanHint.none,
+  bool reconnect = false,
+}) {
+  final String smarty = reconnect ? 'your Smarty' : 'Smarty';
+  if (connecting) {
+    return LookSectionView(
+      header: 'Connecting to $smarty…',
+      icon: LookIcon.spinner,
+    );
+  }
+  if (listed == 0) {
+    if (scanStopped) {
+      return const LookSectionView(
+        header: 'Stopped looking for Smarty',
+        icon: LookIcon.none,
+        hint: 'Something got in the way on this phone.',
+        hintIsWarning: true,
+        showLookAgain: true,
+      );
+    }
+    return LookSectionView(
+      header: 'Looking for $smarty…',
+      icon: LookIcon.spinner,
+      hint: scanHintText(hint),
+      hintIsWarning: hint == ScanHint.stoppedWaiting,
+    );
+  }
+  final String? stoppedHint =
+      scanStopped ? 'Stopped looking for more toys.' : null;
+  if (listed == 1) {
+    return LookSectionView(
+      header: 'Smarty found!',
+      icon: LookIcon.found,
+      hint: stoppedHint,
+      hintIsWarning: scanStopped,
+      showLookAgain: scanStopped,
+    );
+  }
+  return LookSectionView(
+    header: 'Smarty toys nearby',
+    icon: LookIcon.none,
+    subtitle:
+        reconnect ? 'Tap your Smarty.' : 'Tap the one you are setting up.',
+    hint: stoppedHint,
+    hintIsWarning: scanStopped,
+    showLookAgain: scanStopped,
+  );
+}
+
+/// The note under the toy list. A toy that already knows this phone
+/// connects without asking, so when every toy offered is the account's own
+/// ([onlyYours]) it says "if".
+String pairPromptNote({required bool onlyYours}) => onlyYours
+    ? 'If your phone asks to pair with Smarty, tap Pair.'
+    : 'Your phone will ask to pair with Smarty — tap Pair.';
 
 // ---- Wi-Fi step ---------------------------------------------------------------
 //
@@ -228,9 +450,10 @@ String? wifiDecisionMessage(WifiDecision d, {String? ssid}) => switch (d) {
 /// Last step of every "old connection" (pairingBroken) explanation. The toy
 /// keeps its pairings when the buttons are held (firmware §3.11), so
 /// pairingBroken only follows a phone-side forget — the toy still knows this
-/// phone and re-pairs on Try again — or a factory reset (10 s hold). A reset
-/// toy with no pairings left stops advertising once its window closes; the
-/// 3-second hold opens the toy's [pairingWindow] again.
+/// phone and re-pairs on Try again — or a factory reset (10 s hold); a toy
+/// with no pairings left waits to pair for as long as it is on. A toy that
+/// still knows another phone only takes a new one after the 3-second hold
+/// ([pairingWindow]).
 const String pairingRepairFinalStep =
     "Then tap Try again. If Smarty doesn't show up, hold the + and – buttons "
     'for 3 seconds.';
@@ -301,3 +524,78 @@ String connectFailureMessage(ConnectFailure kind, {required bool isIOS}) {
           'and try again.';
   }
 }
+
+// ---- After a failed connect -----------------------------------------------------
+
+/// What the setup page tells the parent after a failed connect. See
+/// [connectAdviceFor].
+enum ConnectAdvice {
+  /// This phone holds a pairing the toy has dropped: [pairingBrokenHeading]
+  /// and the [pairingBrokenStepList] (iOS: forget Smarty in Settings).
+  forgetOldPairing,
+
+  /// The toy refused to pair — it was set up with another phone and isn't
+  /// waiting to pair: [setUpWithAnotherPhoneMessage].
+  holdButtons,
+
+  /// The link just didn't come up, with a toy that said it isn't waiting to
+  /// pair: [maybeAnotherPhoneMessage].
+  maybeHoldButtons,
+
+  /// The plain line for the failure ([connectFailureMessage]).
+  plain,
+}
+
+/// [ConnectAdvice] for a failed connect (pure).
+///
+/// - [kind]: the failure.
+/// - [staleBond]: the phone's Bluetooth said outright that the toy dropped
+///   this phone's pairing ([ConnectException.staleBond]).
+/// - [yours]: the toy is this account's (a known toy — on a freshly set up
+///   phone there is no old pairing to forget).
+/// - [advertPairing]: what the toy said about waiting to pair just before
+///   (null = not reported).
+///
+/// A refused pairing ([ConnectFailure.pairingBroken]) means "forget the old
+/// pairing" only when the phone said so, or when the toy said it IS waiting
+/// to pair (it would have taken a new pairing, so the old one on this phone
+/// is what got in the way). Otherwise, for the account's own toy or a toy
+/// that said it isn't waiting to pair, it was set up with another phone:
+/// hold the buttons. Anything else keeps the old-pairing steps.
+ConnectAdvice connectAdviceFor(
+  ConnectFailure kind, {
+  bool staleBond = false,
+  bool yours = false,
+  bool? advertPairing,
+}) {
+  switch (kind) {
+    case ConnectFailure.pairingBroken:
+      if (staleBond || advertPairing == true) {
+        return ConnectAdvice.forgetOldPairing;
+      }
+      if (yours || advertPairing == false) return ConnectAdvice.holdButtons;
+      return ConnectAdvice.forgetOldPairing;
+    case ConnectFailure.unknown:
+      return advertPairing == false
+          ? ConnectAdvice.maybeHoldButtons
+          : ConnectAdvice.plain;
+    default:
+      return ConnectAdvice.plain;
+  }
+}
+
+/// [ConnectAdvice.holdButtons]: the toy was set up with another phone.
+const String setUpWithAnotherPhoneMessage =
+    'This Smarty was set up with another phone. Hold the + and – buttons on '
+    'it for 3 seconds, then tap Try again.';
+
+/// [ConnectAdvice.maybeHoldButtons].
+const String maybeAnotherPhoneMessage =
+    "We couldn't finish connecting. If this Smarty was set up with another "
+    'phone, hold the + and – buttons on it for 3 seconds, then tap Try again.';
+
+/// Reconnecting found a toy with the right name, but it said it is a
+/// different toy from the one on this account.
+const String notYourToyMessage =
+    "That Smarty isn't the one on your account. Tap Try again to look for "
+    'yours.';

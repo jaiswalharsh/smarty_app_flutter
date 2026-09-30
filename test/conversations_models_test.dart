@@ -4,6 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart' show Timestamp;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:smarty_app/models/conversation.dart';
+import 'package:smarty_app/services/conversations_service.dart'
+    show pickConversationsToy;
 
 ConversationTurn turn(
   String id, {
@@ -23,6 +25,41 @@ ConversationTurn turn(
 
 void main() {
   final t0 = DateTime.utc(2026, 9, 27, 14, 0);
+
+  group('pickConversationsToy (which toy the Conversations tab shows)', () {
+    Timestamp at(int day) => Timestamp.fromDate(DateTime.utc(2026, 9, day));
+    (String, Map<String, dynamic>) linked(String id, int day) =>
+        (id, {'registered_at': at(day)});
+    (String, Map<String, dynamic>) released(String id, int day) =>
+        (id, {'released': true, 'released_at': at(day)});
+
+    test('no toys → null', () {
+      expect(pickConversationsToy(const []), isNull);
+    });
+
+    test("the phone's toy when it's on the account, else the most recently "
+        'linked', () {
+      final records = [linked('aaa', 1), linked('bbb', 5), linked('ccc', 3)];
+      expect(pickConversationsToy(records, savedToyDeviceId: 'ccc'), 'ccc');
+      expect(pickConversationsToy(records), 'bbb');
+      expect(pickConversationsToy(records, savedToyDeviceId: 'zzz'), 'bbb');
+    });
+
+    test('a removed toy (chats kept) is passed over while a linked one is '
+        'left — even if it is the phone\'s toy', () {
+      final records = [released('aaa', 20), linked('bbb', 1)];
+      expect(pickConversationsToy(records), 'bbb');
+      expect(pickConversationsToy(records, savedToyDeviceId: 'aaa'), 'bbb');
+    });
+
+    test('only removed toys: the most recently removed one, so its chats '
+        'stay readable', () {
+      expect(
+          pickConversationsToy(
+              [released('aaa', 2), released('bbb', 9), released('ccc', 4)]),
+          'bbb');
+    });
+  });
 
   group('parsing', () {
     test('turn: streaming / final / aborted, with press_seq', () {

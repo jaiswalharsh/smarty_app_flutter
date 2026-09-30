@@ -21,6 +21,16 @@ void main() {
     });
   });
 
+  group('recordLinksToy', () {
+    test('a record links the toy; none, or a released one, does not', () {
+      expect(recordLinksToy({'device_id': 'x'}), isTrue);
+      expect(recordLinksToy({'released': false}), isTrue);
+      expect(recordLinksToy(null), isFalse);
+      // "I don't have this Smarty any more", chats kept: only the chats stay.
+      expect(recordLinksToy({'device_id': 'x', 'released': true}), isFalse);
+    });
+  });
+
   group('LinkCheckService', () {
     LinkCheckService service({
       String? uid = 'parent-1',

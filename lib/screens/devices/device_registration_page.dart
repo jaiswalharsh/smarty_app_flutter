@@ -75,7 +75,12 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
         return;
       }
 
-      final result = await _registrationService.registerDevice(deviceId);
+      // The name the toy shows over Bluetooth ("Smarty-B11E"), so the
+      // account can recognise it later before connecting.
+      final result = await _registrationService.registerDevice(
+        deviceId,
+        bleName: BleManager().savedToyName,
+      );
       if (!mounted) return;
       if (!result.ok) {
         _fail(result.failure ?? RegistrationFailure.unknown, result.message);
@@ -245,21 +250,26 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
       );
     }
 
+    final bool owned = failure == RegistrationFailure.alreadyOwned;
     return [
-      const Icon(Icons.error_outline, color: Colors.red, size: 64),
+      owned
+          ? Icon(Icons.lock_outline, color: Colors.orange.shade400, size: 64)
+          : const Icon(Icons.error_outline, color: Colors.red, size: 64),
       const SizedBox(height: 16),
       Text(
-        "Couldn't link Smarty",
+        owned ? ownedElsewhereHeading : "Couldn't link Smarty",
         style: TextStyle(
           fontSize: 22,
           fontWeight: FontWeight.w600,
-          color: Colors.red.shade700,
+          color: owned ? Colors.orange.shade800 : Colors.red.shade700,
         ),
         textAlign: TextAlign.center,
       ),
       const SizedBox(height: 8),
       Text(
-        _errorMessage ?? 'Something went wrong. Please try again.',
+        owned
+            ? ownedElsewhereMessage(BleManager().savedToyName)
+            : _errorMessage ?? 'Something went wrong. Please try again.',
         style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
         textAlign: TextAlign.center,
       ),

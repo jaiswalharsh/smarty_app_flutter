@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import '../dev_config.dart';
 import 'ble_manager.dart';
 import 'auth_service.dart';
+import 'known_toys_service.dart';
 
 /// Why linking a toy to the parent's account failed. The page decides which
 /// actions to offer from this (e.g. no Retry for [alreadyOwned]) instead of
@@ -35,14 +36,26 @@ enum RegistrationFailure {
   unknown,
 }
 
+/// Heading when the toy is still linked to another account (HTTP 409).
+const String ownedElsewhereHeading =
+    'This Smarty is still linked to another family.';
+
+/// What to do when the toy is still linked to another account: the other
+/// family removes it (Home → ⋯ → Remove from my account), or we help — with
+/// the toy's code ([bleName], e.g. "Smarty-B11E", when known). There is no
+/// way to take it over from this phone: its id can be read by anyone nearby,
+/// so a claim without the owner would let anyone take a family's toy. Pure.
+String ownedElsewhereMessage(String? bleName) =>
+    'Ask them to open the Smarty app → Home → ⋯ → Remove from my account. '
+    "If you can't reach them, contact office@hey-smarty.com with the code on "
+    'the toy (${normalizeBleName(bleName) ?? 'Smarty-XXXX'}).';
+
 extension RegistrationFailureMessage on RegistrationFailure {
   /// Parent-facing text: what happened, in everyday words, and what to do.
   String get message {
     switch (this) {
       case RegistrationFailure.alreadyOwned:
-        return 'This Smarty is already linked to another account. If it was '
-            'given to you, ask the previous owner to remove it first, or '
-            'contact office@hey-smarty.com.';
+        return ownedElsewhereMessage(null);
       case RegistrationFailure.signInRequired:
         return 'Please sign in again.';
       case RegistrationFailure.network:
@@ -104,11 +117,22 @@ class DeviceRegistrationService {
     return await _bleManager.readDeviceId();
   }
 
-  /// Link [deviceId] to the signed-in account via the Cloud Function.
+  /// The request body for linking [deviceId]: `device_id`, plus `ble_name`
+  /// when [bleName] (the name the toy shows over Bluetooth) is a real toy
+  /// name ("Smarty-B11E") — the account then recognises the toy by name on a
+  /// freshly installed app or a new phone. Pure.
+  static Map<String, String> registerBody(String deviceId, {String? bleName}) {
+    final String? name = normalizeBleName(bleName);
+    return {'device_id': deviceId, if (name != null) 'ble_name': name};
+  }
+
+  /// Link [deviceId] to the signed-in account via the Cloud Function, with
+  /// the toy's Bluetooth name [bleName] if known (see [registerBody]).
   ///
   /// Retries once automatically on a 401 (with a force-refreshed ID token)
   /// and once on a network error/timeout before giving up.
-  Future<RegistrationResult> registerDevice(String deviceId) async {
+  Future<RegistrationResult> registerDevice(String deviceId,
+      {String? bleName}) async {
     String? idToken;
     try {
       idToken = await _authService.idToken;
@@ -144,7 +168,7 @@ class DeviceRegistrationService {
               // ({'device_id', 'timezone'}) so the backend buckets days in
               // the parent's zone (plan §8). Needs `flutter_timezone`
               // (DateTime.timeZoneName only gives "CEST"-style names).
-              body: jsonEncode({'device_id': deviceId}),
+              body: jsonEncode(registerBody(deviceId, bleName: bleName)),
             )
             .timeout(_httpTimeout);
       } on TimeoutException {
@@ -190,6 +214,8 @@ class DeviceRegistrationService {
               message: _ourSideMessage);
         }
         debugPrint('DeviceRegistration: Device registered successfully');
+        // The account's toys changed: read them again next time.
+        KnownToysService.instance.forgetCachedToys();
         return RegistrationResult.success(secret);
       }
 

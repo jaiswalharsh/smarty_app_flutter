@@ -7,12 +7,14 @@ import 'dev_config.dart';
 import 'screens/user_context_page.dart';
 import 'services/ble_manager.dart';
 import 'services/ble_service.dart';
+import 'services/known_toys_service.dart';
 import 'screens/conversations/live_chat_banner.dart';
 import 'screens/devices/setup_steps.dart';
 import 'screens/devices/smarty_connection_page.dart';
 import 'screens/wifi/wifi_config_page.dart';
 import 'widgets/forget_toy.dart';
 import 'widgets/numbered_steps.dart';
+import 'widgets/remove_toy.dart';
 import 'widgets/smarty_card.dart';
 
 /// One-line, parent-facing status for the toy on Home's Smarty card ([short]:
@@ -125,6 +127,20 @@ String toyStatusLineFor({
   return 'Ready to play';
 }
 
+/// The line under "Reconnect your Smarty" (Home, no toy on this phone but
+/// one on the account): names the toy the way it shows over Bluetooth
+/// ([bleName], e.g. "Smarty-B11E"), or just "a Smarty" when unknown. Pure.
+String reconnectOfferLine(String? bleName) {
+  final String? name = normalizeBleName(bleName);
+  return 'You set up ${name ?? 'a Smarty'} on this account before.';
+}
+
+/// The line under "Reconnect your Smarty" for the account's [toys]: the one
+/// toy by name ([reconnectOfferLine]), or how many there are. Pure.
+String reconnectOfferLineFor(List<KnownToy> toys) => toys.length == 1
+    ? reconnectOfferLine(toys.single.bleName)
+    : 'You set up ${toys.length} Smarty toys on this account before.';
+
 /// Whether Home's Smarty card shows its small inline spinner. Pure (tests).
 ///
 /// Probing / connecting always spin — except while a pull-to-refresh is
@@ -157,11 +173,25 @@ bool homeToyCardBusy({
 }
 
 class HomeTab extends StatefulWidget {
-  const HomeTab({super.key, @visibleForTesting this.toyPhase});
+  const HomeTab({
+    super.key,
+    @visibleForTesting this.toyPhase,
+    @visibleForTesting this.knownToys,
+    @visibleForTesting this.savedToyCloudId,
+  });
 
   /// Where the app stands with Smarty; [BleManager.phase] unless a test
   /// supplies its own.
   final ValueListenable<ToyPhase>? toyPhase;
+
+  /// The account's toys (for "Reconnect your Smarty");
+  /// [KnownToysService.instance] unless a test supplies its own.
+  final KnownToys? knownToys;
+
+  /// The cloud id of the toy saved on this phone, for "⋯ → Remove from my
+  /// account"; worked out from [BleManager] and the account's toys unless a
+  /// test supplies its own.
+  final Future<String?> Function()? savedToyCloudId;
 
   @override
   State<HomeTab> createState() => _HomeTabState();
@@ -196,6 +226,21 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   // transitional status by itself).
   static const Duration _statusReadBound = Duration(seconds: 4);
   static const Duration _watchBound = Duration(seconds: 6);
+
+  // ---- No toy on this phone: is one on the account? ------------------------
+  // A freshly installed app (or a new phone) has no saved toy, so
+  // watchSavedToy settles on noToy. Each time Home lands on noToy it asks
+  // the account for its toys (read once per account, then from memory — see
+  // KnownToysService) and, if there are any, offers "Reconnect your Smarty"
+  // instead of a plain setup. Not after the parent forgot their Smarty on
+  // purpose (_forgetToy): that holds the offer back until the app is next
+  // launched or another account signs in.
+  late final KnownToys _knownToys =
+      widget.knownToys ?? KnownToysService.instance;
+  // The account's toys; null while the look-up runs.
+  List<KnownToy>? _accountToys;
+  int _accountToysGen = 0;
+  ToyPhase? _lastPhase;
 
   @override
   void initState() {
@@ -237,6 +282,12 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   void _onPhaseChanged() {
     final ToyPhase phase = _phase.value;
+    // Only on arriving at noToy (sign-in, Forget, a toy owned elsewhere…);
+    // the phase's own rebuild shows the result.
+    if (phase == ToyPhase.noToy && _lastPhase != ToyPhase.noToy) {
+      _lookUpAccountToys();
+    }
+    _lastPhase = phase;
     if (phase == ToyPhase.connected) {
       _armWifiStallTimer();
     } else {
@@ -265,6 +316,28 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       if (now != ToyPhase.probing && now != ToyPhase.connecting) return;
       setState(() => _busyLong = true);
     });
+  }
+
+  // Ask the account for its toys (see _knownToys). Sets the field directly:
+  // callers rebuild (a phase change, or their own setState).
+  void _lookUpAccountToys() {
+    final int gen = ++_accountToysGen;
+    if (!_knownToys.offerReconnect) {
+      _accountToys = const [];
+      return;
+    }
+    _accountToys = null;
+    _knownToys.knownToysForAccount().then(
+      (toys) {
+        if (!mounted || gen != _accountToysGen) return;
+        setState(() => _accountToys = toys);
+      },
+      onError: (Object e) {
+        debugPrint('HomeTab: toys on the account: $e');
+        if (!mounted || gen != _accountToysGen) return;
+        setState(() => _accountToys = const []);
+      },
+    );
   }
 
   // While not nearby but just seen, rebuild when the sighting goes stale.
@@ -365,13 +438,21 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     }
   }
 
-  // Opens the pair/setup flow. Shared by "Set up Smarty", "Finish setup" and
-  // "Set up a different Smarty" so the success-celebration and re-check
-  // handling lives in exactly one place.
-  void _openConnectionPage() {
+  // Opens the pair/setup flow. Shared by "Set up Smarty", "Connect"
+  // (reconnect [reconnectTo]), "Finish setup" and "Set up a different
+  // Smarty" ([newToy]) so the success-celebration and re-check handling
+  // lives in exactly one place.
+  void _openConnectionPage({KnownToy? reconnectTo, bool newToy = false}) {
     Navigator.push<bool>(
       context,
-      MaterialPageRoute(builder: (context) => SmartyConnectionPage()),
+      MaterialPageRoute(
+        builder:
+            (context) => SmartyConnectionPage(
+              reconnectTo: reconnectTo,
+              newToy: newToy,
+              knownToys: _knownToys,
+            ),
+      ),
     ).then((result) {
       if (!mounted) return;
       // `true` means setup finished (linked and on Wi-Fi) — celebrate.
@@ -379,7 +460,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       if (result == true) {
         _activateSuccessCelebration();
       }
-      setState(() {});
+      setState(() {
+        // Still no toy here: the account's toys may have changed meanwhile.
+        if (_phase.value == ToyPhase.noToy) _lookUpAccountToys();
+      });
       unawaited(_bleManager.watchSavedToy());
     });
   }
@@ -400,10 +484,77 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   // "⋯" → "Forget this Smarty": asks first; Home then shows "Set up Smarty"
-  // (the phase moves to noToy).
+  // (the phase moves to noToy) — not "Reconnect your Smarty": forgetting is
+  // what the parent wanted, so the offer is held back (before the phase
+  // moves, so the look-up it starts already knows).
   Future<void> _forgetToy() async {
-    await confirmAndForgetToy(context);
+    await confirmAndForgetToy(
+      context,
+      forget: () async {
+        _knownToys.holdBackReconnectOffer();
+        await _bleManager.forgetToy();
+      },
+    );
     if (mounted) setState(() {});
+  }
+
+  // "I don't have this Smarty any more" on the Reconnect card: asks first,
+  // takes the toy off the account, then shows what's left.
+  Future<void> _removeKnownToy(KnownToy toy) async {
+    final bool removed = await confirmAndRemoveToy(
+      context,
+      bleName: toy.bleName,
+      remove:
+          (keep) =>
+              _knownToys.removeFromAccount(toy.deviceId, keepHistory: keep),
+    );
+    if (!removed || !mounted) return;
+    setState(() {
+      if (_phase.value == ToyPhase.noToy) _lookUpAccountToys();
+    });
+  }
+
+  // "⋯" → "Remove from my account" for the toy saved on this phone: asks
+  // first, takes it off the account and forgets it on this phone too (Home
+  // then offers the account's other toys, or a plain setup).
+  Future<void> _removeSavedToy() async {
+    final String? name = normalizeBleName(_bleManager.savedToyName);
+    await confirmAndRemoveToy(
+      context,
+      bleName: name,
+      remove: (keep) async {
+        final String? id =
+            await (widget.savedToyCloudId ?? () => _savedToyCloudId(name))();
+        if (id == null) {
+          throw const RemoveToyException(RemoveToyProblem.notOnAccount);
+        }
+        await _knownToys.removeFromAccount(id, keepHistory: keep);
+        // removeFromAccount forgets the phone's toy when it can tell it's
+        // this one; here it surely is.
+        if (_bleManager.savedToyId != null) await _bleManager.forgetToy();
+      },
+    );
+    if (mounted) setState(() {});
+  }
+
+  // The saved toy's cloud id: read over Bluetooth this session (or now, if
+  // connected), else the account's toy with its name ([name]); null when
+  // none of that works.
+  Future<String?> _savedToyCloudId(String? name) async {
+    final String? known = _bleManager.savedToyDeviceId;
+    if (known != null) return known;
+    if (_bleManager.isConnected) {
+      final String? read = await _bleManager
+          .readDeviceId()
+          .timeout(const Duration(seconds: 4), onTimeout: () => null)
+          .catchError((Object e) {
+            debugPrint('HomeTab: reading the toy id failed: $e');
+            return null;
+          });
+      final String? id = read?.trim();
+      if (id != null && id.isNotEmpty && id != '{}') return id;
+    }
+    return knownToyIdNamed(await _knownToys.knownToysForAccount(), name);
   }
 
   // Bluetooth-off fix: Android can show the system "turn on" dialog; iOS has
@@ -432,7 +583,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   Widget _buildForPhase(ToyPhase phase) {
     switch (phase) {
       case ToyPhase.noToy:
-        return Padding(padding: _pagePadding, child: _buildNeverPairedView());
+        return Padding(padding: _pagePadding, child: _buildNoToyView());
       case ToyPhase.connected:
         return _showSuccessState
             ? Padding(padding: _pagePadding, child: _buildSuccessView())
@@ -488,6 +639,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
             status: status,
             busy: busy,
             onForget: () => unawaited(_forgetToy()),
+            onRemove:
+                DevConfig.linkingEnabled
+                    ? () => unawaited(_removeSavedToy())
+                    : null,
             rows: [
               _buildWifiRow(phase),
               SmartyCardRow(
@@ -590,6 +745,18 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
+  // A small grey link for the rarely wanted way out ("I don't have this
+  // Smarty any more").
+  Widget _buildQuietAction(String label, VoidCallback onPressed) {
+    return TextButton(
+      onPressed: onPressed,
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 14, color: _secondaryTextColor),
+      ),
+    );
+  }
+
   Widget _buildTextAction(String label, VoidCallback onPressed) {
     return TextButton(
       onPressed: onPressed,
@@ -646,6 +813,137 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   // ---- Per-phase views -------------------------------------------------------
+
+  // No toy on this phone: "Reconnect your Smarty" when the account has one
+  // (and the offer isn't held back), else the plain setup. A small spinner
+  // while the account is asked (≤ 5 s, usually instant).
+  Widget _buildNoToyView() {
+    final List<KnownToy>? toys = _accountToys;
+    if (toys == null) {
+      return Center(
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.5,
+            color: Colors.blue.shade600,
+          ),
+        ),
+      );
+    }
+    if (toys.isNotEmpty && _knownToys.offerReconnect) {
+      return _buildReconnectView(toys);
+    }
+    return _buildNeverPairedView();
+  }
+
+  // Every toy on the account: one → its name in the line and a big Connect;
+  // more → a row each ("Smarty-B11E" + Connect). Each has "I don't have this
+  // Smarty any more". Scrolls when the list is long.
+  Widget _buildReconnectView(List<KnownToy> toys) {
+    final bool single = toys.length == 1;
+    return LayoutBuilder(
+      builder:
+          (context, constraints) => SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Image.asset('assets/images/icon.png', width: 80, height: 80),
+                    SizedBox(height: 20),
+                    Text(
+                      'Reconnect your Smarty',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w600,
+                        color: _headingColor,
+                      ),
+                    ),
+                    SizedBox(height: 12),
+                    Text(
+                      reconnectOfferLineFor(toys),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 16, color: _secondaryTextColor),
+                    ),
+                    SizedBox(height: 24),
+                    if (single) ...[
+                      _buildPrimaryButton(
+                        label: 'Connect',
+                        icon: Icons.bluetooth_searching,
+                        onPressed:
+                            () => _openConnectionPage(reconnectTo: toys.single),
+                      ),
+                      SizedBox(height: 4),
+                      _buildQuietAction(
+                        noLongerHaveToyLabel,
+                        () => unawaited(_removeKnownToy(toys.single)),
+                      ),
+                    ] else
+                      for (final toy in toys) _buildKnownToyRow(toy),
+                    SizedBox(height: 8),
+                    _buildTextAction(
+                      'Set up a different Smarty',
+                      () => _openConnectionPage(newToy: true),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+    );
+  }
+
+  // One of several toys on the Reconnect card.
+  Widget _buildKnownToyRow(KnownToy toy) {
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 0),
+      decoration: BoxDecoration(
+        color: SmartyCard.background(dark),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Image.asset('assets/images/icon.png', width: 32, height: 32),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  toy.bleName ?? 'Smarty',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: _headingColor,
+                  ),
+                ),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.blue.shade600,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () => _openConnectionPage(reconnectTo: toy),
+                child: const Text('Connect'),
+              ),
+            ],
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _buildQuietAction(
+              noLongerHaveToyLabel,
+              () => unawaited(_removeKnownToy(toy)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildNeverPairedView() {
     return Center(
@@ -770,7 +1068,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
           onPressed: () => unawaited(_bleManager.watchSavedToy()),
         ),
         SizedBox(height: 12),
-        _buildTextAction('Set up a different Smarty', _openConnectionPage),
+        _buildTextAction(
+          'Set up a different Smarty',
+          () => _openConnectionPage(newToy: true),
+        ),
       ],
     );
   }

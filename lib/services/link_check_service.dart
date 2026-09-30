@@ -4,6 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
+import 'known_toys_service.dart' show isReleasedRecord;
+
 /// Answers "is this toy linked to the signed-in account?" from the account's
 /// own records. The toy's `registered` flag only says it holds SOME key —
 /// maybe one from another account, a deleted account, or a dev emulator — so
@@ -30,10 +32,17 @@ bool? linkVerdict(DeviceRecordLookup lookup) {
   return lookup.fromCache ? null : false;
 }
 
+/// Whether a `parents/{uid}/devices/{deviceId}` record's fields ([data], null
+/// when there is no record) link the toy to that account: a record the parent
+/// released while keeping its chats ([isReleasedRecord]) doesn't. Pure.
+bool recordLinksToy(Map<String, dynamic>? data) =>
+    data != null && !isReleasedRecord(data);
+
 /// [LinkCheck] against Firestore: `parents/{uid}/devices/{deviceId}` exists
-/// exactly when the toy is linked to that account (registerDevice writes it,
-/// deleteAccount removes it). One read, server first (the default source),
-/// bounded by [timeout].
+/// (and isn't released — see [recordLinksToy]) exactly when the toy is linked
+/// to that account (registerDevice writes it, unregisterDevice releases or
+/// removes it, deleteAccount removes it). One read, server first (the default
+/// source), bounded by [timeout].
 class LinkCheckService implements LinkCheck {
   LinkCheckService({
     FirebaseFirestore? db,
@@ -77,7 +86,10 @@ class LinkCheckService implements LinkCheck {
             .collection('devices')
             .doc(deviceId)
             .get();
-    return (exists: snap.exists, fromCache: snap.metadata.isFromCache);
+    return (
+      exists: recordLinksToy(snap.exists ? snap.data() : null),
+      fromCache: snap.metadata.isFromCache,
+    );
   }
 
   @override

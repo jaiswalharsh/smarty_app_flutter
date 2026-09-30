@@ -81,7 +81,8 @@ WifiRowInfo wifiRowInfo({
 
 /// Home's one Smarty card: a header (the toy's picture, its name, its 4-char
 /// code as small text, a one-line [status] with an optional small spinner,
-/// and a "⋯" button for Forget this Smarty), then [rows], then an optional
+/// and a "⋯" button for Forget this Smarty / Remove from my account), then
+/// [rows], then an optional
 /// [footer] (what to do next: a message and buttons).
 class SmartyCard extends StatelessWidget {
   const SmartyCard({
@@ -91,6 +92,7 @@ class SmartyCard extends StatelessWidget {
     required this.status,
     this.busy = false,
     required this.onForget,
+    this.onRemove,
     required this.rows,
     this.footer = const [],
   });
@@ -109,6 +111,10 @@ class SmartyCard extends StatelessWidget {
 
   /// "⋯" → "Forget this Smarty" (should ask first: see [confirmAndForgetToy]).
   final VoidCallback onForget;
+
+  /// "⋯" → "Remove from my account" (should ask first: see
+  /// [confirmAndRemoveToy]); not offered when null.
+  final VoidCallback? onRemove;
 
   /// [SmartyCardRow]s, under the header.
   final List<Widget> rows;
@@ -222,7 +228,11 @@ class SmartyCard extends StatelessWidget {
                       ],
                     ),
                   ),
-                  ToyMoreButton(color: muted, onForget: onForget),
+                  ToyMoreButton(
+                    color: muted,
+                    onForget: onForget,
+                    onRemove: onRemove,
+                  ),
                 ],
               ),
             ),
