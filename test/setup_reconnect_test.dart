@@ -73,9 +73,11 @@ const KnownToy ownToy =
 const KnownToy secondToy =
     KnownToy(deviceId: '0a0b0c0d0e0f', bleName: 'Smarty-0E11');
 
-/// A toy seen while looking: its name, BLE id, and what it says about
-/// pairing (null = old firmware, no advert data).
-ScanResult toySeen(String name, {required String id, bool? pairing}) =>
+/// A toy seen while looking: its name, BLE id, what it says about pairing
+/// (null = old firmware, no advert data) and whether it says it is linked
+/// to an account ([registered], flags bit2).
+ScanResult toySeen(String name,
+        {required String id, bool? pairing, bool registered = false}) =>
     ScanResult(
       device: BluetoothDevice.fromId(id),
       advertisementData: AdvertisementData(
@@ -87,7 +89,10 @@ ScanResult toySeen(String name, {required String id, bool? pairing}) =>
         serviceData: pairing == null
             ? const {}
             : {
-                Guid('abcd'): [pairing ? 0x01 : 0x00, 0x01],
+                Guid('abcd'): [
+                  (pairing ? 0x01 : 0x00) | (registered ? 0x04 : 0x00),
+                  0x01,
+                ],
               },
         serviceUuids: [Guid('abcd')],
       ),
@@ -269,6 +274,170 @@ void main() {
       expect(connects.map((d) => d.remoteId.str), ['AA:BB:CC:DD:EE:03']);
       expect(find.text(setUpWithAnotherPhoneMessage), findsOneWidget);
       expect(find.text('Open Settings'), findsNothing);
+      await unmount(tester);
+    });
+
+    testWidgets(
+        'reconnect: our LINKED toy refuses to pair → "couldn\'t confirm this '
+        'is your Smarty", the reset under it — never the 3-second hold',
+        (tester) async {
+      final page = await pumpPage(tester,
+          reconnectTo: ownToy, known: FakeKnownToys([ownToy]));
+      await see(tester, page, [
+        toySeen('Smarty-B11E',
+            id: 'AA:BB:CC:DD:EE:01', pairing: false, registered: true),
+      ]);
+      expect(find.text('Your Smarty'), findsOneWidget);
+      await tester.pump(autoSelectDelay + const Duration(milliseconds: 50));
+      await tester.pump();
+      expect(connects.map((d) => d.remoteId.str), ['AA:BB:CC:DD:EE:01']);
+
+      expect(find.text(notConfirmedMessage), findsOneWidget);
+      expect(find.text(resetAndSetUpAgainLine), findsOneWidget);
+      expect(find.text('Try again'), findsOneWidget);
+      expect(find.text(setUpWithAnotherPhoneMessage), findsNothing);
+      expect(find.textContaining('3 seconds.'), findsOneWidget); // the reset
+      expect(find.textContaining('for 3 seconds, then'), findsNothing);
+      expect(find.text(pairingBrokenHeading), findsNothing);
+      expect(find.textContaining('Add another phone'), findsNothing);
+      await unmount(tester);
+    });
+
+    testWidgets(
+        'the toy turned down the account proof → the same "couldn\'t '
+        'confirm" advice', (tester) async {
+      final page = await pumpPage(tester,
+          reconnectTo: ownToy,
+          known: FakeKnownToys([ownToy]),
+          failWith: const ConnectException(ConnectFailure.notYourAccount));
+      await see(tester, page, [
+        toySeen('Smarty-B11E',
+            id: 'AA:BB:CC:DD:EE:01', pairing: false, registered: true),
+      ]);
+      await tester.pump(autoSelectDelay + const Duration(milliseconds: 50));
+      await tester.pump();
+      expect(connects, hasLength(1));
+      expect(find.text(notConfirmedMessage), findsOneWidget);
+      expect(find.text(resetAndSetUpAgainLine), findsOneWidget);
+      expect(find.text(pairingBrokenHeading), findsNothing);
+      expect(find.text('Try again'), findsOneWidget);
+      await unmount(tester);
+    });
+
+    testWidgets(
+        'set up: our linked toy is "Your Smarty" and connected by itself, '
+        'whatever it says about pairing', (tester) async {
+      final page = await pumpPage(tester, known: FakeKnownToys([ownToy]));
+      await see(tester, page, [
+        toySeen('Smarty-B11E',
+            id: 'AA:BB:CC:DD:EE:01', pairing: true, registered: true),
+      ]);
+      expect(find.text('Your Smarty'), findsOneWidget);
+      expect(find.text(otherFamilySubtitle), findsNothing);
+      await tester.pump(autoSelectDelay + const Duration(milliseconds: 50));
+      await tester.pump();
+      expect(connects, hasLength(1));
+      await unmount(tester);
+    });
+
+    testWidgets(
+        "set up: a linked toy that isn't ours is another family's — greyed "
+        'under "Other Smarty toys nearby", never connected; tapping explains',
+        (tester) async {
+      final known = FakeKnownToys([]);
+      final page = await pumpPage(tester, known: known);
+      await see(tester, page, [
+        // Even while it waits to pair: it only takes its own family's phones.
+        toySeen('Smarty-1234',
+            id: 'AA:BB:CC:DD:EE:03', pairing: true, registered: true),
+      ]);
+
+      expect(find.text('Looking for Smarty…'), findsOneWidget);
+      expect(find.text(otherToysHeading), findsOneWidget);
+      expect(find.text('Smarty 1234'), findsOneWidget);
+      expect(find.text(otherFamilySubtitle), findsOneWidget);
+      expect(find.text(otherToySubtitle), findsNothing);
+      expect(find.byIcon(Icons.lock_outline), findsOneWidget);
+      expect(
+        find.ancestor(
+            of: find.text('Smarty 1234'), matching: find.byType(Opacity)),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(seconds: 1));
+      expect(connects, isEmpty);
+
+      final int asksBefore = known.asks;
+      await tester.tap(find.text('Smarty 1234'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(known.asks, asksBefore + 1); // asked again, just in case
+      expect(connects, isEmpty);
+      expect(find.text(otherFamilyHeading), findsOneWidget);
+      expect(find.text(otherFamilyMessage('Smarty-1234')), findsOneWidget);
+
+      await tester.tap(find.text('OK'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text(otherFamilyHeading), findsNothing);
+      expect(connects, isEmpty);
+      expect(find.text('Smarty 1234'), findsOneWidget); // still looking
+      await unmount(tester);
+    });
+
+    testWidgets(
+        "another family's toy after all ours: the account's toys (read again "
+        'on the tap) know it — connected as "Your Smarty"', (tester) async {
+      final known = FakeKnownToys([]); // the first read came back empty
+      final page = await pumpPage(tester, known: known);
+      await see(tester, page, [
+        toySeen('Smarty-B11E',
+            id: 'AA:BB:CC:DD:EE:01', pairing: false, registered: true),
+      ]);
+      expect(find.text(otherFamilySubtitle), findsOneWidget);
+
+      known.toys.add(ownToy); // now it answers
+      await tester.tap(find.text('Smarty B11E'));
+      await tester.pump();
+      await tester.pump();
+      expect(connects.map((d) => d.remoteId.str), ['AA:BB:CC:DD:EE:01']);
+      expect(find.text(otherFamilyHeading), findsNothing);
+      await unmount(tester);
+    });
+
+
+    testWidgets(
+        'instructions: reconnecting says a new phone just signs in with the '
+        'same account — no button hold, nothing to do on another phone',
+        (tester) async {
+      await pumpPage(tester,
+          reconnectTo: ownToy, known: FakeKnownToys([ownToy]));
+      expect(find.text(reconnectFirstLine), findsOneWidget);
+      expect(find.text(newPhoneLine), findsOneWidget);
+      expect(find.textContaining('hold'), findsNothing);
+      expect(find.textContaining('⋯'), findsNothing);
+      await unmount(tester);
+    });
+
+    testWidgets(
+        'instructions: set up with a toy on the account adds the new-phone '
+        'line; without one (or for a different Smarty) it doesn\'t',
+        (tester) async {
+      await pumpPage(tester, known: FakeKnownToys([ownToy]));
+      await tester.pump();
+      expect(find.text(setupFirstBootLine), findsOneWidget);
+      expect(find.text(setupButtonHoldLine), findsOneWidget);
+      expect(find.text(newPhoneLine), findsOneWidget);
+      await unmount(tester);
+
+      await pumpPage(tester, known: FakeKnownToys([]));
+      await tester.pump();
+      expect(find.text(setupButtonHoldLine), findsOneWidget);
+      expect(find.text(newPhoneLine), findsNothing);
+      await unmount(tester);
+
+      await pumpPage(tester, newToy: true, known: FakeKnownToys([ownToy]));
+      await tester.pump();
+      expect(find.text(newPhoneLine), findsNothing);
       await unmount(tester);
     });
 

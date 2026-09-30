@@ -1,10 +1,12 @@
 import 'dart:async';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:smarty_app/services/ble_manager.dart';
+import 'package:smarty_app/services/toy_claim.dart';
 
 void main() {
   group('BleManager.classifyConnectError', () {
@@ -492,6 +494,230 @@ void main() {
           stale(ConnectException(ConnectFailure.pairingBroken,
               Exception('Peer removed pairing information'))),
           isTrue);
+    });
+  });
+
+  group('the claim (proving the account to the toy)', () {
+    // Verified in Node (registerDevice) and in the toy's C.
+    const secret =
+        '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+    const hash =
+        '6c86c6aac5fb24bcf5d9939cb7d7d5645ce39418f449e03b262dd4fa14b4b92b';
+    final nonce = List<int>.generate(16, (i) => i);
+    const proofHex =
+        'b3a802b9a68fda55e785411ad4f06311a250cc9d652baa6a7cafe8f2b0656225';
+
+    String hex(List<int> bytes) =>
+        bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+    test('claim key = SHA-256 of the secret, lowercase hex (as the backend '
+        'stores device_secret_hash)', () {
+      expect(claimKeyFromSecret(secret), hash);
+      expect(isClaimKey(claimKeyFromSecret(secret)), isTrue);
+    });
+
+    test('proof = HMAC-SHA256(key: the 64 hex characters as ASCII, message: '
+        'the 16 raw nonce bytes), 32 raw bytes', () {
+      final proof = claimProof(hash, nonce);
+      expect(proof, hasLength(claimProofLength));
+      expect(hex(proof), proofHex);
+      // Keyed with the hex text, not with the 32 digest bytes it spells.
+      final List<int> digestBytes = [
+        for (var i = 0; i < 64; i += 2)
+          int.parse(hash.substring(i, i + 2), radix: 16),
+      ];
+      expect(hex(Hmac(sha256, digestBytes).convert(nonce).bytes),
+          isNot(proofHex));
+      // A fresh nonce, a different proof.
+      expect(hex(claimProof(hash, List<int>.filled(16, 0))), isNot(proofHex));
+    });
+
+    test('isClaimKey: 64 lowercase hex only', () {
+      expect(isClaimKey(hash), isTrue);
+      expect(isClaimKey(hash.toUpperCase()), isFalse);
+      expect(isClaimKey(hash.substring(1)), isFalse);
+      expect(isClaimKey('${hash}0'), isFalse);
+      expect(isClaimKey('g${hash.substring(1)}'), isFalse);
+      expect(isClaimKey(null), isFalse);
+      expect(isClaimKey(42), isFalse);
+      expect(claimNonceLength, 16);
+    });
+
+    test('shouldClaim: a toy with the claim characteristic that doesn\'t say '
+        'it is unlinked', () {
+      expect(
+          BleManager.shouldClaim(
+              hasClaimCharacteristic: true, advertRegistered: true),
+          isTrue);
+      // Not seen just before (a background reconnect): prove anyway.
+      expect(
+          BleManager.shouldClaim(
+              hasClaimCharacteristic: true, advertRegistered: null),
+          isTrue);
+      // Not linked: nobody's account to prove.
+      expect(
+          BleManager.shouldClaim(
+              hasClaimCharacteristic: true, advertRegistered: false),
+          isFalse);
+      expect(
+          BleManager.shouldClaim(
+              hasClaimCharacteristic: false, advertRegistered: true),
+          isFalse);
+    });
+
+    group('claimVerdictFor', () {
+      ConnectFailure? verdict(
+        ConnectFailure failure, {
+        bool linkDown = true,
+        Duration? sinceProof,
+        bool secured = false,
+        bool? registered = true,
+      }) =>
+          BleManager.claimVerdictFor(
+            failure: failure,
+            linkDown: linkDown,
+            sinceProof: sinceProof,
+            secured: secured,
+            advertRegistered: registered,
+          );
+
+      test('the proof write failed → not this account', () {
+        expect(verdict(ConnectFailure.notYourAccount, linkDown: false),
+            ConnectFailure.notYourAccount);
+      });
+
+      test('the toy hung up right after the proof → not this account '
+          '(whatever the failure looked like)', () {
+        for (final f in [
+          ConnectFailure.unknown,
+          ConnectFailure.outOfRange,
+          ConnectFailure.pairingBroken,
+        ]) {
+          expect(verdict(f, sinceProof: const Duration(milliseconds: 200)),
+              ConnectFailure.notYourAccount,
+              reason: f.name);
+          expect(verdict(f, sinceProof: BleManager.claimRejectWindow),
+              ConnectFailure.notYourAccount,
+              reason: f.name);
+        }
+      });
+
+      test('a proof that was taken: a later drop is not about it', () {
+        expect(
+            verdict(ConnectFailure.unknown,
+                sinceProof: BleManager.claimRejectWindow +
+                    const Duration(milliseconds: 1)),
+            isNull);
+        // Still up: nothing to say.
+        expect(
+            verdict(ConnectFailure.unknown,
+                linkDown: false, sinceProof: Duration.zero),
+            isNull);
+      });
+
+      test('a linked toy, no proof, nothing encrypted worked, link gone → a '
+          'refused pairing', () {
+        expect(verdict(ConnectFailure.unknown), ConnectFailure.pairingBroken);
+        expect(
+            verdict(ConnectFailure.outOfRange), ConnectFailure.pairingBroken);
+      });
+
+      test('…but not when paired, not linked (or not saying), or the failure '
+          'already says more', () {
+        expect(verdict(ConnectFailure.unknown, secured: true), isNull);
+        expect(verdict(ConnectFailure.unknown, registered: false), isNull);
+        expect(verdict(ConnectFailure.unknown, registered: null), isNull);
+        expect(verdict(ConnectFailure.pairingBroken), isNull);
+        expect(verdict(ConnectFailure.unknown, linkDown: false), isNull);
+      });
+
+      test('never for a cancel, the Bluetooth states or a toy that isn\'t a '
+          'Smarty', () {
+        for (final f in [
+          ConnectFailure.cancelledByUser,
+          ConnectFailure.bluetoothOff,
+          ConnectFailure.needsPermission,
+          ConnectFailure.notSmarty,
+        ]) {
+          expect(verdict(f, sinceProof: Duration.zero), isNull,
+              reason: f.name);
+          expect(verdict(f), isNull, reason: f.name);
+        }
+      });
+    });
+
+    test('notYourAccount is its own failure kind', () {
+      expect(
+          BleManager.classifyConnectError(
+              const ConnectException(ConnectFailure.notYourAccount)),
+          ConnectFailure.notYourAccount);
+      expect(
+          BleManager.isStaleBondEvidence(
+              const ConnectException(ConnectFailure.notYourAccount)),
+          isFalse);
+    });
+  });
+
+  group('LinkDropTracker: the toy turning an unproven phone away', () {
+    final t0 = DateTime(2026, 9, 30, 12);
+    Duration s(int secs) => Duration(seconds: secs);
+
+    test('no proof, never encrypted, dropped 20–60 s after connecting → '
+        'turned away (decided at once)', () {
+      for (final secs in [20, 30, 45, 60]) {
+        final tracker = LinkDropTracker();
+        tracker.linkUp(t0);
+        expect(tracker.linkDown(t0.add(s(secs))), LinkDropVerdict.turnedAway,
+            reason: '$secs s');
+      }
+    });
+
+    test('a paired link, or one the toy took the proof on, is an ordinary '
+        'drop', () {
+      final paired = LinkDropTracker()..linkUp(t0);
+      paired.linkSecured();
+      expect(paired.linkDown(t0.add(s(30))), LinkDropVerdict.normal);
+
+      final proved = LinkDropTracker()..linkUp(t0);
+      proved.linkProved();
+      expect(proved.linkDown(t0.add(s(30))), LinkDropVerdict.normal);
+    });
+
+    test('outside the window: as before', () {
+      final early = LinkDropTracker()..linkUp(t0);
+      expect(early.linkDown(t0.add(s(10))), LinkDropVerdict.normal);
+      final late = LinkDropTracker()..linkUp(t0);
+      expect(late.linkDown(t0.add(s(61))), LinkDropVerdict.normal);
+      final quick = LinkDropTracker()..linkUp(t0);
+      expect(quick.linkDown(t0.add(s(1))), LinkDropVerdict.quick);
+    });
+
+    test('ours is ours; the marks belong to one link', () {
+      final ours = LinkDropTracker()..linkUp(t0);
+      expect(ours.linkDown(t0.add(s(30)), intentional: true),
+          LinkDropVerdict.intentional);
+
+      final tracker = LinkDropTracker()..linkUp(t0);
+      tracker.linkSecured();
+      expect(tracker.linkDown(t0.add(s(5))), LinkDropVerdict.normal);
+      // The next link starts unpaired and unproven.
+      tracker.linkUp(t0.add(s(10)));
+      expect(tracker.linkDown(t0.add(s(40))), LinkDropVerdict.turnedAway);
+      // Marks without a link do nothing.
+      tracker
+        ..linkSecured()
+        ..linkProved()
+        ..linkUp(t0.add(s(100)));
+      expect(tracker.linkDown(t0.add(s(130))), LinkDropVerdict.turnedAway);
+    });
+
+    test('turned away breaks a quick-drop streak', () {
+      final tracker = LinkDropTracker();
+      tracker.linkUp(t0);
+      expect(tracker.linkDown(t0.add(s(1))), LinkDropVerdict.quick);
+      tracker.linkUp(t0.add(s(2)));
+      expect(tracker.linkDown(t0.add(s(32))), LinkDropVerdict.turnedAway);
+      expect(tracker.quickDrops, 0);
     });
   });
 }

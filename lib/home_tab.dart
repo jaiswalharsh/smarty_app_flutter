@@ -1085,9 +1085,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       iconColor: Colors.orange.shade400,
       bodySteps: pairingBrokenStepList(isIOS: isIOS),
       actions: [
-        // Opens setup, not just another quick look: after the button hold
-        // the toy only waits a couple of minutes, and the setup page keeps looking
-        // (with the same instructions) for as long as it's open.
+        // Opens setup, not just another quick look: the setup page keeps
+        // looking for as long as it's open, proves this phone is on the
+        // toy's account (so a linked toy lets it pair again), and says what
+        // to do if the toy still refuses.
         _buildPrimaryButton(
           label: 'Try again',
           icon: Icons.refresh,

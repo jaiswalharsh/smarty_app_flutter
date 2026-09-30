@@ -111,15 +111,18 @@ void main() {
       );
     });
 
-    test('clearing removes only that account\'s keys', () async {
+    test('clearing removes only that account\'s keys — its toys\' claim keys '
+        'too', () async {
       SharedPreferences.setMockInitialValues({
         'smarty_saved_device_id_u1': 'AA:BB',
         'smarty_saved_device_name_u1': 'Smarty-1234',
         'smarty_last_wifi_u1': 'Home',
         'user_context_u1': '{"name":"Zosia"}',
         'user_context_pending_sync_u1': true,
+        'toy_claim_key_u1_1cc3abc9b11c': 'a' * 64,
         'smarty_saved_device_id_u2': 'CC:DD',
         'user_context_u2': '{"name":"Jan"}',
+        'toy_claim_key_u2_1cc3abc9b11c': 'b' * 64,
         'theme_mode': 'dark',
       });
       await clearLocalAccountData('u1');
@@ -127,6 +130,7 @@ void main() {
       expect(prefs.getKeys(), {
         'smarty_saved_device_id_u2',
         'user_context_u2',
+        'toy_claim_key_u2_1cc3abc9b11c',
         'theme_mode',
       });
     });

@@ -9,7 +9,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../dev_config.dart';
 import '../utils/wifi_utils.dart';
 import 'ble_service.dart';
+import 'known_toys_service.dart' show KnownToysService;
 import 'link_check_service.dart';
+import 'toy_claim.dart';
 
 /// Outcome of a Wi-Fi provisioning attempt, derived from the device's own status
 /// characteristic — NOT merely from the BLE credential write being acknowledged.
@@ -29,8 +31,12 @@ enum WifiProvisionResult {
 /// Firmware facts this relies on (bt_setup.c): a bonded toy advertises
 /// continuously whenever it is on and not connected, so a short scan that sees
 /// nothing means off / out of range / connected to another phone — we can't
-/// tell which, so [notNearby] must never claim "the toy is off". Entering
-/// pairing mode wipes the toy's bonds, which surfaces here as [pairingBroken].
+/// tell which, so [notNearby] must never claim "the toy is off". A toy
+/// keeps its bonds when its pairing window opens; only a factory reset (or
+/// the toy erasing itself after being removed from its account) drops them,
+/// which surfaces here as [pairingBroken]. A toy linked to an account only
+/// lets a phone pair once it has proved it is on that account (the claim —
+/// see [BleManager.shouldClaim]); its buttons can't open pairing.
 enum ToyPhase {
   /// Signed out, or no toy saved for this account. Offer setup.
   noToy,
@@ -53,10 +59,12 @@ enum ToyPhase {
   /// Link is coming up / the Smarty service is being set up.
   connecting,
 
-  /// The phone holds a pairing the toy no longer knows (the toy was put in
-  /// pairing mode, or set up with another phone). iOS: the parent must forget
-  /// Smarty in Settings → Bluetooth. Android: the bond is removed
-  /// automatically; the next attempt pairs fresh. Never auto-retried.
+  /// The phone holds a pairing the toy no longer knows (the toy was reset,
+  /// or erased itself after being removed from its account), or the toy
+  /// turned this phone away (it couldn't prove it is on the toy's account).
+  /// iOS: the parent must forget Smarty in Settings → Bluetooth. Android: the
+  /// bond is removed automatically; the next attempt pairs fresh. Never
+  /// auto-retried.
   pairingBroken,
 
   /// Fully set up: characteristics cached, status monitoring running.
@@ -66,9 +74,11 @@ enum ToyPhase {
 /// Why a connect/initialize attempt failed. See [ConnectException] and
 /// [BleManager.classifyConnectError].
 enum ConnectFailure {
-  /// The phone's stored pairing is stale (toy wiped its bonds / was set up
-  /// with another phone). Recovery: forget in iOS Settings; removeBond on
-  /// Android (done automatically by BleManager).
+  /// The phone's stored pairing is stale (toy wiped its bonds), or the toy
+  /// refused to pair with this phone (set up with another phone and not
+  /// waiting to pair, or linked and this phone couldn't prove its account —
+  /// see [ConnectException.staleBond]). Recovery: forget in iOS Settings;
+  /// removeBond on Android (done automatically by BleManager).
   pairingBroken,
 
   /// The attempt was cancelled (by the app itself, or the user declined).
@@ -86,6 +96,12 @@ enum ConnectFailure {
 
   /// The app lacks Bluetooth permission.
   needsPermission,
+
+  /// The toy turned down this phone's account proof (the claim — see
+  /// [BleManager.shouldClaim]): the proof write failed, or the toy hung up
+  /// right after it. This phone's account isn't the toy's (or the key it
+  /// used is out of date — it is dropped, so Try again reads it afresh).
+  notYourAccount,
 
   /// Anything else.
   unknown,
@@ -136,6 +152,14 @@ enum LinkDropVerdict {
   /// that no longer knows this phone (iOS connects, fails to encrypt and hangs
   /// up ~0.4 s later, often without a telling reason).
   repeatedQuickDrops,
+
+  /// The toy hung up on a link where no account proof was given and nothing
+  /// encrypted ever worked, [LinkDropTracker.turnedAwayAfter]–
+  /// [LinkDropTracker.turnedAwayBefore] after it came up: the toy closes the
+  /// link of a phone that neither proved its account nor is paired with it
+  /// 30 s after it connects (bt_setup.c). A refused pairing, decided at
+  /// once.
+  turnedAway,
 }
 
 /// Pure bookkeeping for the "connected, then dropped almost at once" signature
@@ -151,6 +175,8 @@ class LinkDropTracker {
   LinkDropTracker({
     this.quickWindow = const Duration(seconds: 4),
     this.threshold = 2,
+    this.turnedAwayAfter = const Duration(seconds: 20),
+    this.turnedAwayBefore = const Duration(seconds: 60),
   });
 
   /// A drop sooner than this after link-up counts as quick.
@@ -159,8 +185,17 @@ class LinkDropTracker {
   /// Quick drops in a row that mean "pairing broken".
   final int threshold;
 
+  /// A link that never got encrypted ([linkSecured]) nor carried an account
+  /// proof ([linkProved]) and dropped this long after coming up — up to
+  /// [turnedAwayBefore] — was the toy turning this phone away
+  /// ([LinkDropVerdict.turnedAway]).
+  final Duration turnedAwayAfter;
+  final Duration turnedAwayBefore;
+
   bool _up = false;
   DateTime? _upAt;
+  bool _secure = false;
+  bool _proved = false;
   int _quickDrops = 0;
 
   /// Whether a link is currently recorded as up.
@@ -175,6 +210,21 @@ class LinkDropTracker {
     if (_up) return;
     _up = true;
     _upAt = now;
+    _secure = false;
+    _proved = false;
+  }
+
+  /// Something encrypted worked on the link that is up (the phone is paired
+  /// with the toy): its drop can't be the toy turning this phone away.
+  void linkSecured() {
+    if (_up) _secure = true;
+  }
+
+  /// The toy took this phone's account proof on the link that is up: it now
+  /// waits (up to a minute) for the phone to pair — a drop after that is
+  /// the pairing not finishing, not the toy turning this phone away.
+  void linkProved() {
+    if (_up) _proved = true;
   }
 
   /// The link went down at [now]. Returns null when no link was recorded as
@@ -182,8 +232,11 @@ class LinkDropTracker {
   /// connect, which is classified from its error instead).
   ///
   /// [intentional] (we dropped it) leaves the streak unchanged;
-  /// [pairingReason] decides at once. A [repeatedQuickDrops] or
-  /// [pairingReason] verdict resets the streak.
+  /// [pairingReason] decides at once, and so does a link that never got
+  /// encrypted nor carried an account proof dropping
+  /// [turnedAwayAfter]–[turnedAwayBefore] after it came up
+  /// ([LinkDropVerdict.turnedAway]). A [repeatedQuickDrops],
+  /// [pairingReason] or [turnedAway] verdict resets the streak.
   LinkDropVerdict? linkDown(
     DateTime now, {
     bool pairingReason = false,
@@ -191,14 +244,25 @@ class LinkDropTracker {
   }) {
     if (!_up) return null;
     final DateTime? upAt = _upAt;
+    final bool secure = _secure || _proved;
     _up = false;
     _upAt = null;
+    _secure = false;
+    _proved = false;
     if (intentional) return LinkDropVerdict.intentional;
     if (pairingReason) {
       _quickDrops = 0;
       return LinkDropVerdict.pairingReason;
     }
-    if (upAt == null || now.difference(upAt) > quickWindow) {
+    final Duration? held = upAt == null ? null : now.difference(upAt);
+    if (!secure &&
+        held != null &&
+        held >= turnedAwayAfter &&
+        held <= turnedAwayBefore) {
+      _quickDrops = 0;
+      return LinkDropVerdict.turnedAway;
+    }
+    if (held == null || held > quickWindow) {
       _quickDrops = 0; // a link that held breaks the streak
       return LinkDropVerdict.normal;
     }
@@ -235,6 +299,8 @@ class LinkDropTracker {
   void reset() {
     _up = false;
     _upAt = null;
+    _secure = false;
+    _proved = false;
     _quickDrops = 0;
   }
 }
@@ -457,6 +523,11 @@ class BleManager {
   /// Timeout for a DIRECT connect once the probe has seen the toy advertise.
   static const Duration directConnectTimeout = Duration(seconds: 10);
 
+  /// How long a toy that isn't linked to an account waits for a phone after
+  /// its + and – buttons are held (bt_setup.c). A toy that has never been
+  /// paired waits for as long as it is on.
+  static const Duration toyPairingWindow = Duration(minutes: 2);
+
   // Connected device
   BluetoothDevice? _connectedDevice;
 
@@ -496,6 +567,7 @@ class BleManager {
   String? _repairToyId;
   bool _needsRepairFor(BluetoothDevice device) =>
       _repairToyId != null && _repairToyId == device.remoteId.str;
+
 
   // Device a direct connect() is in flight for (connectAndInitialize). Lets
   // forgetToy()/disconnectAndReset() cancel it — _connectedDevice is still
@@ -623,6 +695,11 @@ class BleManager {
   // Advert version per toy BLE id (mirrors the `toy_adv_ver_<id>` prefs).
   final Map<String, int> _advVersionByToy = {};
 
+  // What each toy advertised when last seen (null = no advert data), by BLE
+  // id, for this app session — e.g. whether it is linked, which decides the
+  // claim (see [shouldClaim]).
+  final Map<String, ToyAdvert?> _advertByToy = {};
+
   // Latest sighting of the saved toy by the launch/resume probe.
   String? _lastSeenToyId;
   ToyAdvert? _lastSeenAdvert;
@@ -662,14 +739,16 @@ class BleManager {
     _lastSeenAdvert = advert;
     _lastSeenAt = DateTime.now();
     debugPrint("BleManager: saw saved toy — $advert");
-    rememberAdvertVersion(id, advert);
+    rememberAdvert(id, advert);
   }
 
-  /// Record the advert version seen for [toyId] (0 for old firmware / no
-  /// advert data), in memory and in SharedPreferences, so
-  /// [userContextMaxBytes] is right once that toy is connected. Called by the
-  /// probe and by the setup page when the parent picks a toy.
-  void rememberAdvertVersion(String toyId, ToyAdvert? advert) {
+  /// Record what [toyId] just advertised: whether it is linked (in memory —
+  /// it decides the claim, see [shouldClaim]) and its advert version (0 for
+  /// no advert data; in memory and in SharedPreferences, so
+  /// [userContextMaxBytes] is right once that toy is connected). Called by
+  /// the probe and by the setup page when the parent picks a toy.
+  void rememberAdvert(String toyId, ToyAdvert? advert) {
+    _advertByToy[toyId] = advert;
     final int version = advert?.version ?? 0;
     if (_advVersionByToy[toyId] == version) return;
     _advVersionByToy[toyId] = version;
@@ -697,6 +776,9 @@ class BleManager {
   BluetoothCharacteristic? _userDataCharacteristic;
   BluetoothCharacteristic? _deviceSecretCharacteristic;
   BluetoothCharacteristic? _deviceInfoCharacteristic;
+  // ab07 "Claim", unencrypted: read → a fresh 16-byte nonce; write the
+  // account proof ([claimProof]) to be let in.
+  BluetoothCharacteristic? _claimCharacteristic;
 
   // Connection state subscription
   StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
@@ -738,6 +820,21 @@ class BleManager {
   // a dev emulator's). Once per connection, a toy that counts as linked is
   // checked against the account's records (see [_checkAccount]).
   final LinkCheck _linkCheck = LinkCheckService();
+  // The claim (see [shouldClaim]): where claim keys come from; the link the
+  // last account proof was written on, when, and which key (by toy id /
+  // name) it used; and the link on which something encrypted last worked.
+  // Proof and secure marks are cleared when a link is set up afresh.
+  ClaimKeys? _claimKeysOverride;
+  ClaimKeys get _claimKeys => _claimKeysOverride ?? KnownToysService.instance;
+  BluetoothDevice? _provedOn;
+  DateTime? _provedAt;
+  String? _proofKeyToyId;
+  String? _proofKeyToyName;
+  BluetoothDevice? _securedOn;
+
+  /// Tests only: where claim keys come from (null = the app's own).
+  @visibleForTesting
+  set debugClaimKeys(ClaimKeys? keys) => _claimKeysOverride = keys;
   BluetoothDevice? _accountCheckFor; // connection the check belongs to
   Future<void>? _accountCheck; // in flight or finished, for that connection
   bool _accountCheckSettled = false;
@@ -1066,6 +1163,9 @@ class BleManager {
     }
     _watchLink(device);
     if (device.isConnected) _noteLinkUp(device);
+    // A link being set up afresh: nothing proved or encrypted on it yet.
+    if (_provedOn == device) _provedOn = null;
+    if (_securedOn == device) _securedOn = null;
     _setPhase(ToyPhase.connecting);
 
     // Switching toys: drop the previous toy's link first. Reset FIRST so its
@@ -1108,9 +1208,10 @@ class BleManager {
       _updateRegistered();
       debugPrint("🔄 BleManager: Initializing with device: ${device.platformName}");
 
-      // Request larger MTU for WiFi scan chunks and JSON status notifications.
-      // Android only — requestMtu always throws on iOS, which negotiates the
-      // MTU itself. A failure here is not fatal: long writes still work.
+      // Request larger MTU for WiFi scan chunks, JSON status notifications
+      // and the 32-byte account proof. Android only — requestMtu always
+      // throws on iOS, which negotiates the MTU itself. A failure here is not
+      // fatal: long writes still work (the toy takes them for the proof too).
       if (Platform.isAndroid) {
         try {
           await device.requestMtu(512);
@@ -1120,18 +1221,7 @@ class BleManager {
         }
       }
 
-      // Trigger bonding on Android (prevents double pairing popup bug)
-      // iOS handles bonding automatically when encrypted characteristics are accessed
-      if (Platform.isAndroid) {
-        try {
-          await device.createBond();
-          debugPrint("BleManager: Bond created/confirmed on Android");
-        } catch (e) {
-          debugPrint("BleManager: Bond creation skipped (may already be bonded): $e");
-        }
-      }
-
-      // Discover services
+      // Discover services (unencrypted).
       bool servicesReady = await _discoverServices();
 
       if (!servicesReady) {
@@ -1143,6 +1233,26 @@ class BleManager {
         throw const ConnectException(ConnectFailure.notSmarty);
       }
 
+      // Prove this phone is on the toy's account BEFORE anything encrypted —
+      // no status read, no subscription, no device-id read, no bonding: a
+      // linked toy refuses to pair with (and drops) a phone it doesn't know
+      // that hasn't proved that. Skipped when there is no key at hand; a
+      // phone the toy already knows gets in without it.
+      await _claim(device);
+
+      // Trigger bonding on Android (prevents double pairing popup bug) —
+      // after the proof, see above. iOS handles bonding automatically when
+      // encrypted characteristics are accessed (a toy that took the proof
+      // also asks for it itself).
+      if (Platform.isAndroid) {
+        try {
+          await device.createBond();
+          debugPrint("BleManager: Bond created/confirmed on Android");
+        } catch (e) {
+          debugPrint("BleManager: Bond creation skipped (may already be bonded): $e");
+        }
+      }
+
       // Enable status notifications and WAIT for the result: the firmware
       // starts encryption right after connect, so a stale pairing surfaces
       // here (insufficient authentication/encryption) rather than as a silent
@@ -1150,6 +1260,7 @@ class BleManager {
       // slow first-time pairing prompt must not abort setup.
       try {
         await _subscribeStatus(_statusCharacteristic!);
+        _noteLinkSecured(device);
       } catch (e) {
         if (classifyConnectError(e) == ConnectFailure.pairingBroken) rethrow;
         debugPrint("⚠️ BleManager: Enabling status notifications failed (non-fatal): $e");
@@ -1205,6 +1316,15 @@ class BleManager {
         failure = ConnectException(
             kind, e, kind == ConnectFailure.pairingBroken && staleBond);
       }
+      // The claim decides some drops: the toy hangs up at once on a wrong
+      // proof, and on a phone that touched it encrypted without one.
+      final ConnectFailure? claimVerdict = _claimVerdict(device, failure);
+      if (claimVerdict == ConnectFailure.notYourAccount) {
+        _forgetClaimKeyOf(device);
+      }
+      if (claimVerdict != null) {
+        failure = ConnectException(claimVerdict, e, false);
+      }
       debugPrint("❌ BleManager: initialize failed (${failure.kind.name}): $e");
       // Reset FIRST so the intentional disconnect below can't fire the
       // disconnect handler, then drop the link so a half-initialized device
@@ -1220,6 +1340,7 @@ class BleManager {
       // view of the drop can land after ours) — report it as such.
       if (failure.kind != ConnectFailure.pairingBroken &&
           failure.kind != ConnectFailure.cancelledByUser &&
+          failure.kind != ConnectFailure.notYourAccount &&
           _needsRepairFor(device)) {
         failure = ConnectException(ConnectFailure.pairingBroken, e, staleBond);
       }
@@ -1233,6 +1354,176 @@ class BleManager {
       }
       throw failure;
     }
+  }
+
+  // ---- The claim: proving this phone is on the toy's account ---------------
+
+  /// How long to wait for the claim key (this phone's copy, else the
+  /// account's records) before going on without the proof.
+  static const Duration claimKeyTimeout = Duration(seconds: 6);
+
+  /// The toy hangs up at once on a wrong proof: a link that goes down this
+  /// soon after the proof was written means the proof was turned down.
+  static const Duration claimRejectWindow = Duration(seconds: 3);
+
+  /// Whether to prove the account to a toy before touching anything
+  /// encrypted (pure): the toy has the claim characteristic (ab07) and
+  /// doesn't say it is unlinked ([advertRegistered] true, or not known —
+  /// e.g. a background reconnect without a fresh sighting). A linked toy
+  /// only lets a phone pair once it has proved it is on the toy's account
+  /// (reading a fresh nonce, writing [claimProof] of it); a phone it already
+  /// knows gets in without. The key is looked up only when this says so,
+  /// and without one the proof is skipped.
+  static bool shouldClaim({
+    required bool hasClaimCharacteristic,
+    required bool? advertRegistered,
+  }) =>
+      hasClaimCharacteristic && advertRegistered != false;
+
+  /// What the claim says about a failed connect (pure), or null when it
+  /// says nothing (the failure stands):
+  /// - [ConnectFailure.notYourAccount] when [failure] already is (the proof
+  ///   write failed), or when the link went down ([linkDown]) within
+  ///   [claimRejectWindow] after the proof ([sinceProof]; null = no proof on
+  ///   this link) — the toy hangs up at once on a wrong proof.
+  /// - [ConnectFailure.pairingBroken] (a refused pairing, not a stale one)
+  ///   when the toy said it is linked ([advertRegistered]), no proof went to
+  ///   it on this link, nothing encrypted worked ([secured] false) and the
+  ///   link went down — the toy drops a phone it doesn't know that touches
+  ///   it encrypted without a proof — replacing a failure that says less
+  ///   ([ConnectFailure.unknown] / [ConnectFailure.outOfRange]).
+  /// Never for a cancel, the Bluetooth states or a toy that isn't a Smarty.
+  static ConnectFailure? claimVerdictFor({
+    required ConnectFailure failure,
+    required bool linkDown,
+    Duration? sinceProof,
+    bool secured = false,
+    bool? advertRegistered,
+  }) {
+    switch (failure) {
+      case ConnectFailure.notYourAccount:
+        return ConnectFailure.notYourAccount;
+      case ConnectFailure.cancelledByUser:
+      case ConnectFailure.bluetoothOff:
+      case ConnectFailure.needsPermission:
+      case ConnectFailure.notSmarty:
+        return null;
+      default:
+        break;
+    }
+    if (!linkDown) return null;
+    if (sinceProof != null) {
+      return sinceProof <= claimRejectWindow
+          ? ConnectFailure.notYourAccount
+          : null;
+    }
+    if (!secured &&
+        advertRegistered == true &&
+        (failure == ConnectFailure.unknown ||
+            failure == ConnectFailure.outOfRange)) {
+      return ConnectFailure.pairingBroken;
+    }
+    return null;
+  }
+
+  // [claimVerdictFor] for a failed initialize of [device].
+  ConnectFailure? _claimVerdict(BluetoothDevice device, ConnectException f) {
+    final DateTime? at = _provedOn == device ? _provedAt : null;
+    return claimVerdictFor(
+      failure: f.kind,
+      linkDown: device.isDisconnected,
+      sinceProof: at == null ? null : DateTime.now().difference(at),
+      secured: _securedOn == device,
+      advertRegistered: _advertByToy[device.remoteId.str]?.registered,
+    );
+  }
+
+  // The proof on [device] was just written and the link is going down: the
+  // toy turned it down (the drop is its verdict, not a stale pairing).
+  bool _justProved(BluetoothDevice device) {
+    final DateTime? at = _provedOn == device ? _provedAt : null;
+    return at != null && DateTime.now().difference(at) <= claimRejectWindow;
+  }
+
+  // The name [device] goes by over Bluetooth ("Smarty-B11E"), for finding
+  // its claim key before anything encrypted (its id, ab06, is encrypted).
+  String? _nameOf(BluetoothDevice device) {
+    for (final String n in [device.advName, device.platformName]) {
+      if (n.trim().isNotEmpty) return n.trim();
+    }
+    return device.remoteId.str == _savedToyId ? _savedToyName : null;
+  }
+
+  // Prove the account to [device] when [shouldClaim] says so and a key is at
+  // hand: read the nonce (ab07, unencrypted, fresh per connection), write
+  // [claimProof] of it back with a response. Throws
+  // ConnectException(notYourAccount) when the toy turns the proof down;
+  // anything else here just leaves the proof out.
+  Future<void> _claim(BluetoothDevice device) async {
+    final BluetoothCharacteristic? c = _claimCharacteristic;
+    final String remote = device.remoteId.str;
+    if (c == null ||
+        !shouldClaim(
+          hasClaimCharacteristic: true,
+          advertRegistered: _advertByToy[remote]?.registered,
+        )) {
+      return;
+    }
+    final String? known = _toyDeviceIdByRemote[remote];
+    final String? deviceId = _idReadable(known) ? known : null;
+    final String? name = _nameOf(device);
+    String? key;
+    try {
+      key = await _claimKeys
+          .claimKeyFor(deviceId: deviceId, bleName: name)
+          .timeout(claimKeyTimeout, onTimeout: () => null);
+    } catch (e) {
+      debugPrint("⚠️ BleManager: claim key look-up failed: $e");
+    }
+    if (key == null || !isClaimKey(key)) {
+      debugPrint("BleManager: no claim key for ${name ?? remote} — "
+          "connecting without the account proof");
+      return;
+    }
+    final List<int> nonce;
+    try {
+      nonce = await c.read();
+    } catch (e) {
+      // The steps that follow find out whether the link is still up.
+      debugPrint("⚠️ BleManager: reading the claim nonce failed: $e");
+      return;
+    }
+    if (nonce.length != claimNonceLength) {
+      debugPrint("⚠️ BleManager: claim nonce is ${nonce.length} bytes — "
+          "connecting without the account proof");
+      return;
+    }
+    _provedOn = device;
+    _provedAt = DateTime.now();
+    _proofKeyToyId = deviceId;
+    _proofKeyToyName = name;
+    try {
+      await c.write(claimProof(key, nonce),
+          withoutResponse: false, allowLongWrite: true);
+    } catch (e) {
+      debugPrint("❌ BleManager: the toy turned the account proof down: $e");
+      throw ConnectException(ConnectFailure.notYourAccount, e);
+    }
+    _noteLinkProved(device);
+    debugPrint("✅ BleManager: account proof sent");
+  }
+
+  // The toy turned down the proof made with this key: drop it, so Try
+  // again reads the account's records afresh (e.g. the toy was linked again
+  // since, with a new secret).
+  void _forgetClaimKeyOf(BluetoothDevice device) {
+    if (_provedOn != device) return;
+    final String? id = _proofKeyToyId;
+    unawaited(_claimKeys
+        .forgetClaimKey(deviceId: id, bleName: id == null ? _proofKeyToyName : null)
+        .catchError((Object e) {
+      debugPrint("⚠️ BleManager: dropping the claim key failed: $e");
+    }));
   }
 
   /// The toy said its GATT table changed (Service Changed). Debounced: iOS
@@ -1349,6 +1640,7 @@ class BleManager {
     _userDataCharacteristic = null;
     _deviceSecretCharacteristic = null;
     _deviceInfoCharacteristic = null;
+    _claimCharacteristic = null;
     _connectedWifi = "NotConnected";
     _statusRegistered = null;
     _localRegistered = null;
@@ -1398,6 +1690,10 @@ class BleManager {
         _smartyService!,
         "ab06",
       );
+      _claimCharacteristic = BleService.findCharacteristic(
+        _smartyService!,
+        "ab07",
+      );
 
       debugPrint("📋 BleManager: Characteristics — "
           "status=${_statusCharacteristic != null ? 'OK' : 'MISSING'}, "
@@ -1405,7 +1701,8 @@ class BleManager {
           "wifiCreds=${_wifiCredsCharacteristic != null ? 'OK' : 'MISSING'}, "
           "userData=${_userDataCharacteristic != null ? 'OK' : 'MISSING'}, "
           "deviceSecret=${_deviceSecretCharacteristic != null ? 'OK' : 'MISSING'}, "
-          "deviceInfo=${_deviceInfoCharacteristic != null ? 'OK' : 'MISSING'}");
+          "deviceInfo=${_deviceInfoCharacteristic != null ? 'OK' : 'MISSING'}, "
+          "claim=${_claimCharacteristic != null ? 'OK' : 'MISSING'}");
 
       // Require at least the status characteristic
       if (_statusCharacteristic == null) {
@@ -1514,6 +1811,10 @@ class BleManager {
         }
       }
       
+      // The status is encrypted: reading it means the phone is paired.
+      final BluetoothDevice? live = _connectedDevice;
+      if (live != null) _noteLinkSecured(live);
+
       // Process the data
       await _processStatusData(data);
       
@@ -2239,6 +2540,7 @@ class BleManager {
         return;
       }
 
+
       _ensureAdapterWatch();
       final adapter = await BleService.getBluetoothState();
       if (gen != _sessionGen) return;
@@ -2789,6 +3091,19 @@ class BleManager {
     _dropsToyId = null;
   }
 
+  // Something encrypted worked on [device]'s link: it is paired (see
+  // [LinkDropTracker.linkSecured]).
+  void _noteLinkSecured(BluetoothDevice device) {
+    _securedOn = device;
+    if (_dropsToyId == device.remoteId.str) _drops.linkSecured();
+  }
+
+  // The toy took the account proof on [device]'s link (see
+  // [LinkDropTracker.linkProved]).
+  void _noteLinkProved(BluetoothDevice device) {
+    if (_dropsToyId == device.remoteId.str) _drops.linkProved();
+  }
+
   void _noteLinkUp(BluetoothDevice device) {
     // Another toy is being followed (e.g. setup of a new Smarty while the old
     // one's background connect fires): leave that toy's streak alone.
@@ -2808,16 +3123,20 @@ class BleManager {
     final bool ours = (_ownDisconnects[device.remoteId.str] ?? 0) > 0 ||
         isOwnDisconnectReason(reason) ||
         FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on;
+    // Right after the account proof, the drop is the toy's verdict on the
+    // proof (see [claimVerdictFor]) — not a sign of a stale pairing.
+    final bool proofTurnedDown = _justProved(device);
     final LinkDropVerdict? verdict = _drops.linkDown(
       DateTime.now(),
-      pairingReason: !ours && isPairingBrokenReason(reason),
-      intentional: ours,
+      pairingReason: !ours && !proofTurnedDown && isPairingBrokenReason(reason),
+      intentional: ours || proofTurnedDown,
     );
     if (verdict == null) return false;
     debugPrint("BleManager: link down — ${verdict.name}"
         "${verdict == LinkDropVerdict.quick ? ' #${_drops.quickDrops}' : ''} ($reason)");
     switch (verdict) {
       case LinkDropVerdict.pairingReason:
+      case LinkDropVerdict.turnedAway:
         return true;
       case LinkDropVerdict.repeatedQuickDrops:
         return device.remoteId.str == _savedToyId;
@@ -3135,13 +3454,24 @@ class BleManager {
   }
 
   /// Forget this account's toy: cancel any pending connect, drop the link,
-  /// remove the Android bond, clear the saved id/name, and go to
-  /// [ToyPhase.noToy]. (On iOS the parent must also forget Smarty in
-  /// Settings → Bluetooth to set it up again later.)
+  /// remove the Android bond, clear the saved id/name and the toy's claim
+  /// key kept on this phone, and go to [ToyPhase.noToy]. (On iOS the parent
+  /// must also forget Smarty in Settings → Bluetooth to set it up again
+  /// later.)
   Future<void> forgetToy() async {
     _sessionGen++;
     _watchFuture = null;
     _repairToyId = null;
+    // Its claim key goes too — by its id when it was read, else its name.
+    final String? toyId = savedToyDeviceId;
+    final String? toyName = toyId == null ? savedToyName : null;
+    if (toyId != null || toyName != null) {
+      unawaited(_claimKeys
+          .forgetClaimKey(deviceId: toyId, bleName: toyName)
+          .catchError((Object e) {
+        debugPrint("⚠️ BleManager: dropping the claim key failed: $e");
+      }));
+    }
     final device = _connectedDevice ??
         (_savedToyId != null ? BluetoothDevice.fromId(_savedToyId!) : null);
     // A direct connect still in flight (setup page) — cancel it too.

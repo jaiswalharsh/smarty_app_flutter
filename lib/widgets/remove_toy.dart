@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 
+import '../screens/devices/setup_steps.dart' show factoryResetGesture;
 import '../services/known_toys_service.dart';
 
 /// The link that starts it (Home's "Reconnect your Smarty", the setup page
@@ -16,21 +17,27 @@ const String removeToyLabel = 'Remove from my account';
 const String removeToySubtitle =
     'Unlinks it from your account; frees it for another family.';
 
-/// The sheet's text.
+/// The sheet's text. Removing works as a remote wipe: the toy checks in with
+/// our server each time it starts and after every conversation, and once it
+/// learns it was removed it erases everything on itself (the child's
+/// profile, Wi-Fi, phone pairings, the account link) — wherever it is.
 const String removeToyBody =
-    'This Smarty will stop being linked to you. Someone else can then set it '
-    'up on their account.';
+    'Smarty will be removed from your account. The next time it is on and '
+    "online, it erases your child's profile, your Wi-Fi and its phone "
+    "pairings by itself — even if it isn't with you. Someone else can then "
+    'set it up.';
 const String keepConversationsLabel =
     'Keep its conversations in my Conversations tab (for 90 days)';
 
-/// Before the toy changes hands: its own settings (Wi-Fi, the link key) are
-/// erased on the toy itself, never from the app or the cloud.
-const String eraseToyNote =
-    'Before handing Smarty to someone else, hold + and – on it for 10 '
-    'seconds to erase your settings.';
+/// The way to erase the toy without the internet: the factory reset gesture
+/// on the toy itself.
+const String offlineResetNote =
+    "If Smarty can't get online, reset it by hand: $factoryResetGesture.";
 
-/// iPhone only, after [eraseToyNote].
-const String eraseToyNoteIOS = 'Then forget Smarty in Settings → Bluetooth.';
+/// iPhone only, after [offlineResetNote]: the iPhone keeps its own pairing
+/// with Smarty until it is forgotten there.
+const String forgetOnIPhoneNote =
+    'On this iPhone, also forget Smarty in Settings → Bluetooth.';
 
 /// The sheet's title for the toy called [bleName] ("Smarty-B11E"), or "this
 /// Smarty" when its name isn't known. Pure.
@@ -41,11 +48,13 @@ String removeToyTitle(String? bleName) =>
 String toyRemovedMessage(String? bleName) =>
     '${normalizeBleName(bleName) ?? 'Smarty'} was removed from your account.';
 
-/// Asks "Remove Smarty-B11E from your account?" in a bottom sheet, with
-/// "Keep its conversations in my Conversations tab (for 90 days)" — off
-/// unless the parent turns it on (it's a child's chats: nothing is kept by
-/// default) — and a note on erasing the toy before handing it on (+ forget
-/// it in Settings → Bluetooth on iPhone: [isIOS], default this phone).
+/// Asks "Remove Smarty-B11E from your account?" in a bottom sheet, saying
+/// that Smarty then erases itself the next time it is online
+/// ([removeToyBody]), with "Keep its conversations in my Conversations tab
+/// (for 90 days)" — off unless the parent turns it on (it's a child's chats:
+/// nothing is kept by default) — and a note on resetting it by hand when it
+/// can't get online ([offlineResetNote]; + forget it in Settings → Bluetooth
+/// on iPhone: [isIOS], default this phone).
 /// Remove runs [remove] with that choice while its button spins; a
 /// [RemoveToyException] (or any error) is shown in the sheet, which stays
 /// open so the parent can try again. On success the sheet closes, the note
@@ -86,7 +95,7 @@ class RemoveToySheet extends StatefulWidget {
   final String? bleName;
   final Future<void> Function(bool keepHistory) remove;
 
-  /// Adds [eraseToyNoteIOS].
+  /// Adds [forgetOnIPhoneNote].
   final bool isIOS;
 
   @override
@@ -168,8 +177,8 @@ class _RemoveToySheetState extends State<RemoveToySheet> {
                   Expanded(
                     child: Text(
                       widget.isIOS
-                          ? '$eraseToyNote $eraseToyNoteIOS'
-                          : eraseToyNote,
+                          ? '$offlineResetNote $forgetOnIPhoneNote'
+                          : offlineResetNote,
                       style: TextStyle(fontSize: 14, color: secondary),
                     ),
                   ),

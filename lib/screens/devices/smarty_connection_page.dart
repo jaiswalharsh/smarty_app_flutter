@@ -3,8 +3,10 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:provider/provider.dart';
 
 import '../../dev_config.dart';
+import '../../providers/user_context_provider.dart';
 import '../../services/ble_manager.dart';
 import '../../services/ble_service.dart';
 import '../../services/device_registration_service.dart';
@@ -26,8 +28,12 @@ import '../../widgets/remove_toy.dart';
 /// to the account → Wi-Fi → done. Toys linked to the account ([KnownToys],
 /// matched by name) are listed as "Your Smarty" whatever they say about
 /// pairing; toys that aren't waiting to pair and aren't the account's go
-/// under "Other Smarty toys nearby". What is connected by itself is
-/// [autoSelectIndex]'s call; everything else waits for a tap.
+/// under "Other Smarty toys nearby" — as "Set up by another family", never
+/// connected, when they say they are linked to an account (see
+/// [toyListingFor]). What is connected by itself is [autoSelectIndex]'s
+/// call; everything else waits for a tap. After linking a toy, the child's
+/// profile this phone keeps for the account is sent to it again
+/// ([UserContextProvider.resendAfterLink]) — a reset toy comes back empty.
 ///
 /// While reconnecting, after [reconnectWayOutAfter] without the toy, the page
 /// also offers "Set up a different Smarty" (the page carries on as
@@ -191,6 +197,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   // the "is it really the account's toy" check.
   ToyListing? _targetListing;
   bool? _targetAdvertPairing;
+  bool? _targetRegistered;
   KnownToy? _targetKnown;
   ConnectFailure? _failure;
   // The failure's phone-side "old pairing" evidence (ConnectException).
@@ -204,6 +211,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   // The toy that turned out to be another account's ("Smarty-B11E"), for
   // the message.
   String? _ownedElsewhereName;
+  // Another family's toy was tapped and its explanation is on its way.
+  bool _explainingOtherFamily = false;
 
   // ---- After connect ---------------------------------------------------------
   // Bumped whenever the flow is abandoned (link lost / restarted); async
@@ -325,7 +334,13 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     if (_stage == _Stage.ownedElsewhere) return;
     final phase = _ble.phase.value;
     if (_afterConnectStages.contains(_stage) && phase != ToyPhase.connected) {
-      _onLinkLost();
+      if (phase == ToyPhase.pairingBroken) {
+        // The toy turned this phone away after connecting (it never paired):
+        // say why, as for a refused pairing — not "lost touch".
+        _onTurnedAway();
+      } else {
+        _onLinkLost();
+      }
       return;
     }
     if (_stage == _Stage.lost ||
@@ -344,6 +359,20 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     _wifiSub = null;
     _cancelWifiTimers();
     setState(() => _stage = _Stage.lost);
+  }
+
+  void _onTurnedAway() {
+    debugPrint('SmartyConnectionPage: the toy turned this phone away');
+    _flowGen++;
+    _wifiSub?.cancel();
+    _wifiSub = null;
+    _cancelWifiTimers();
+    _ourToy = null;
+    setState(() {
+      _stage = _Stage.failed;
+      _clearFailure();
+      _failure = ConnectFailure.pairingBroken;
+    });
   }
 
   /// The toy BleManager has connected, if setup should carry on with it:
@@ -410,6 +439,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     });
     _armWayOut();
     _startScan(restart: true);
+    // The account's toys again, in case the first read came back empty
+    // (offline, slow): its own toy must never pass for another family's.
+    unawaited(_knownSource.knownToysForAccount().then(_onKnownToys));
   }
 
   // (Re)start the [reconnectWayOutAfter] wait (reconnect mode only).
@@ -545,7 +577,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       for (final t in _known) t.deviceId: t,
       for (final t in toys) t.deviceId: t,
     };
-    _known = byId.values.toList();
+    setState(() => _known = byId.values.toList());
     debugPrint('SmartyConnectionPage: toys on this account: $_known');
     _applyResults(); // re-label what's already listed
   }
@@ -615,6 +647,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         case ToyListing.candidate:
           candidates.add(r);
         case ToyListing.other:
+        case ToyListing.otherFamily:
           others.add(r);
       }
     }
@@ -658,9 +691,17 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   ScanHint _currentHint() => scanHintFor(
         DateTime.now().difference(_lookingSince),
         anyListed: _found.isNotEmpty,
-        othersNearby: _others.isNotEmpty,
-        reconnect: mode == SetupMode.reconnect,
+        othersNearby: othersShowHowToPair([
+          for (final r in _others)
+            _listingById[r.device.remoteId.str] ?? ToyListing.other,
+        ]),
+        lookingForYours: _lookingForYours,
       );
+
+  // The page is after the account's own (linked) toy: reconnecting it, or
+  // setting up again with a toy on the account (see [lookingForYoursIn]).
+  bool get _lookingForYours =>
+      lookingForYoursIn(mode, accountHasToys: _known.isNotEmpty);
 
   List<ListedToy> get _listedToys => [
         for (final r in _found)
@@ -738,11 +779,12 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     if (_connecting) return;
     _connecting = true;
     _cancelAutoSelect();
-    // Remember what this toy advertised (its profile size depends on it); it
-    // stops advertising once connected.
+    // Remember what this toy advertised (its profile size and whether it is
+    // linked — the account proof — depend on it); it stops advertising once
+    // connected.
     final id = device.remoteId.str;
     if (_advertById.containsKey(id)) {
-      _ble.rememberAdvertVersion(id, _advertById[id]);
+      _ble.rememberAdvert(id, _advertById[id]);
     }
     setState(() {
       _stage = _Stage.connecting;
@@ -750,6 +792,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       _targetName = name;
       _targetListing = _listingById[id];
       _targetAdvertPairing = _advertById[id]?.pairing;
+      _targetRegistered = _advertById[id]?.registered;
       _targetKnown = _knownFor(id, name);
       _clearFailure();
     });
@@ -885,7 +928,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
 
     // The toy's own report, or — for firmware that can't report it —
     // BleManager's local record keyed by the toy's id. null = can't tell:
-    // show the link step rather than silently skipping it.
+    // show the link step rather than silently skipping it. Linked to this
+    // account already (e.g. this phone was just added to it): nothing to do.
     final bool? registered = await _ble.refreshRegistered();
     if (_stale(gen) || !mounted) return false;
     if (registered == true) {
@@ -893,6 +937,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       return true;
     }
 
+    // Taken now, while this page's context is sure to be usable.
+    final UserContextProvider? profile = _profileProvider();
     final LinkResult? result = await Navigator.push<LinkResult>(
       context,
       MaterialPageRoute(builder: (_) => const DeviceRegistrationPage()),
@@ -907,6 +953,11 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     if (result == LinkResult.linked) {
       _ble.markRegistered();
       _linkDone = true;
+      // A toy that needed linking was new, reset, or erased itself after
+      // being removed from an account: its profile is empty (or not this
+      // family's). Send the one this account has — even if the link just
+      // dropped: it then goes out when Smarty is back.
+      unawaited(profile?.resendAfterLink());
     } else {
       // "Not now" / back: carry on with Wi-Fi; Home keeps offering
       // "Finish setup".
@@ -924,6 +975,15 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       return false;
     }
     return true;
+  }
+
+  // The child's profile (null in tests that don't provide it).
+  UserContextProvider? _profileProvider() {
+    try {
+      return Provider.of<UserContextProvider>(context, listen: false);
+    } on ProviderNotFoundException {
+      return null;
+    }
   }
 
   /// The account link found this toy linked to another account: forget it
@@ -1199,6 +1259,15 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         _hint == ScanHint.stoppedWaiting &&
         _blocker == null;
     final bool reconnect = mode == SetupMode.reconnect;
+    // The account's toy is linked: a new phone only needs this account —
+    // say so when that is the toy the page is after.
+    final List<String> lines = reconnect
+        ? const [reconnectFirstLine, newPhoneLine]
+        : [
+            setupFirstBootLine,
+            setupButtonHoldLine,
+            if (_lookingForYours) newPhoneLine,
+          ];
     final TextStyle bodyStyle = TextStyle(
       fontSize: 16,
       height: 1.35,
@@ -1241,12 +1310,10 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                         : Colors.blue.shade900,
                   ),
                 ),
-                const SizedBox(height: 6),
-                Text(reconnect ? reconnectFirstLine : setupFirstBootLine,
-                    style: bodyStyle),
-                const SizedBox(height: 6),
-                Text(reconnect ? reconnectButtonHoldLine : setupButtonHoldLine,
-                    style: bodyStyle),
+                for (final line in lines) ...[
+                  const SizedBox(height: 6),
+                  Text(line, style: bodyStyle),
+                ],
               ],
             ),
           ),
@@ -1356,7 +1423,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     }
 
     // Toys that aren't waiting to pair: greyed, but tappable (one may know
-    // this phone from another account).
+    // this phone from another account) — and another family's toys, which
+    // only explain themselves when tapped.
     if (!connecting && _others.isNotEmpty) {
       out
         ..add(const SizedBox(height: 24))
@@ -1370,7 +1438,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         ))
         ..add(const SizedBox(height: 8));
       for (final r in _others) {
-        out.add(_toyTile(r.device, _nameOf(r), ToyListing.other));
+        out.add(_toyTile(r.device, _nameOf(r),
+            _listingById[r.device.remoteId.str] ?? ToyListing.other));
       }
     }
 
@@ -1434,15 +1503,21 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     final bool busy = _connecting || _stage != _Stage.scanning;
     final String? code = BleManager.toyCode(rawName);
     final String display = BleManager.toyDisplayName(rawName);
-    final bool other = listing == ToyListing.other;
+    final bool otherFamily = listing == ToyListing.otherFamily;
+    final bool other = listing == ToyListing.other || otherFamily;
     // "Your Smarty" only for this account's own toy; anything else is just
     // "Smarty" + its code (it could be a neighbour's).
     final String title = switch (listing) {
       ToyListing.yours => 'Your Smarty',
       ToyListing.candidate => display,
-      ToyListing.other => code != null ? '$display $code' : display,
+      ToyListing.other ||
+      ToyListing.otherFamily => code != null ? '$display $code' : display,
     };
-    final String? subtitle = other ? otherToySubtitle : code;
+    final String? subtitle = otherFamily
+        ? otherFamilySubtitle
+        : other
+            ? otherToySubtitle
+            : code;
     final Color accent = Colors.blue.shade600;
     final Widget card = Card(
       elevation: highlight ? 3 : (other ? 0 : 1),
@@ -1479,13 +1554,58 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
                       ),
                     ),
                   )
-                : Icon(Icons.chevron_right,
+                : Icon(otherFamily ? Icons.lock_outline : Icons.chevron_right,
                     color: busy || other ? Colors.grey : accent),
-        onTap: busy ? null : () => _connect(device, rawName ?? ''),
+        onTap: busy
+            ? null
+            : otherFamily
+                ? () => unawaited(_onOtherFamilyTapped(device, rawName))
+                : () => _connect(device, rawName ?? ''),
       ),
     );
-    // Greyed: it can't pair with this phone unless its buttons are held.
+    // Greyed: it can't pair with this phone unless its buttons are held — or,
+    // another family's, at all.
     return other && !isTarget ? Opacity(opacity: 0.6, child: card) : card;
+  }
+
+  /// Another family's toy was tapped ([ToyListing.otherFamily]): never
+  /// connect — explain. The account's toys are asked for once more first
+  /// (from memory, normally): if the read before came back empty (offline,
+  /// slow), this may be the parent's own toy after all, and then it is
+  /// connected as such.
+  Future<void> _onOtherFamilyTapped(
+      BluetoothDevice device, String? rawName) async {
+    if (_explainingOtherFamily) return;
+    _explainingOtherFamily = true;
+    try {
+      _onKnownToys(await _knownSource.knownToysForAccount());
+      if (!mounted || _stage != _Stage.scanning || _connecting) return;
+      if (_isYours(device.remoteId.str, rawName)) {
+        _connect(device, rawName ?? '');
+        return;
+      }
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      await _explainOtherFamily(rawName);
+    } finally {
+      _explainingOtherFamily = false;
+    }
+  }
+
+  Future<void> _explainOtherFamily(String? rawName) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: Icon(Icons.lock_outline, color: Colors.orange.shade400),
+        title: const Text(otherFamilyHeading),
+        content: Text(otherFamilyMessage(rawName)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildFailure() {
@@ -1504,8 +1624,10 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       staleBond: _failureStaleBond,
       yours: _targetListing == ToyListing.yours,
       advertPairing: _targetAdvertPairing,
+      registered: _targetRegistered,
     );
     final bool forgetOld = advice == ConnectAdvice.forgetOldPairing;
+    final bool notConfirmed = advice == ConnectAdvice.notConfirmed;
     return _buildMessage(
       icon: advice == ConnectAdvice.plain ? Icons.error_outline : Icons.link_off,
       iconColor: Colors.orange.shade400,
@@ -1513,11 +1635,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       // (same words as Home). Otherwise: one line.
       text: switch (advice) {
         ConnectAdvice.forgetOldPairing => pairingBrokenHeading,
+        ConnectAdvice.notConfirmed => notConfirmedMessage,
         ConnectAdvice.holdButtons => setUpWithAnotherPhoneMessage,
         ConnectAdvice.maybeHoldButtons => maybeAnotherPhoneMessage,
         ConnectAdvice.plain => connectFailureMessage(kind, isIOS: isIOS),
       },
       steps: forgetOld ? pairingBrokenStepList(isIOS: isIOS) : null,
+      // The way out when this account can't prove it's the toy's.
+      hint: notConfirmed ? resetAndSetUpAgainLine : null,
       actions: [
         _primaryButton('Try again', Icons.refresh, _lookAgain),
         if (forgetOld && isIOS) ...[

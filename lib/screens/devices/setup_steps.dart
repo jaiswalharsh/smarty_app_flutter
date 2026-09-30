@@ -4,12 +4,15 @@
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../../services/ble_manager.dart';
+import '../../services/known_toys_service.dart' show normalizeBleName;
 
 // ---- Toy timing (firmware: bt_setup.c) ---------------------------------------
 
-/// How long a toy waits for a phone after the + and – buttons are held. (A
-/// toy that has never been paired waits for as long as it is on.)
-const Duration pairingWindow = Duration(minutes: 2);
+/// How long a toy that isn't linked to an account waits for a phone after
+/// its + and – buttons are held (a linked toy's buttons can't open pairing:
+/// a phone of its account proves itself instead — see BleManager's claim).
+/// A toy that has never been paired waits for as long as it is on.
+const Duration pairingWindow = BleManager.toyPairingWindow;
 
 /// The "Smarty found!" beat before connecting to a toy by ourselves.
 const Duration autoSelectDelay = Duration(milliseconds: 600);
@@ -48,10 +51,28 @@ final String setupButtonHoldLine =
 const String reconnectFirstLine =
     'Turn Smarty on and keep it close to your phone.';
 
-/// Instructions card when reconnecting, second line: a phone Smarty doesn't
-/// know yet needs the button hold.
-const String reconnectButtonHoldLine =
-    'New phone? Also hold the + and – buttons together for 3 seconds.';
+/// Instructions card, last line, when reconnecting — and when setting up
+/// with a toy already on the account: a phone signed in to the toy's
+/// account proves that to the toy, which then lets it pair. Nothing to do
+/// on the phone that has Smarty now, and no buttons to hold.
+const String newPhoneLine =
+    'Using a new phone? Just sign in with the same account — Smarty will let '
+    'it pair.';
+
+// ---- Resetting ------------------------------------------------------------------
+
+/// The factory reset gesture (lower case, to go inside a sentence). Two
+/// steps so it can't happen by accident: three beeps after 10 seconds, five
+/// quick beeps after the second hold. It erases everything on the toy —
+/// phone pairings, Wi-Fi, the child's profile and the account link.
+const String factoryResetGesture =
+    'hold + and – for 10 seconds, let go, then hold them again for 3 seconds';
+
+/// Under [notConfirmedMessage]: the way out when this account can't prove
+/// the toy is its own (e.g. it was set up with an account nobody can sign
+/// in to any more).
+const String resetAndSetUpAgainLine =
+    'Reset Smarty: $factoryResetGesture. Then set it up again.';
 
 // ---- Which toys to offer ------------------------------------------------------
 
@@ -75,20 +96,55 @@ enum ToyListing {
   /// "Other Smarty toys nearby" (tapping still tries — it may know this
   /// phone from another account).
   other,
+
+  /// Says it is linked to an account, and isn't this account's: greyed,
+  /// under "Other Smarty toys nearby" as "Set up by another family".
+  /// Tapping explains ([otherFamilyMessage]) and never connects — a linked
+  /// toy only takes phones of its own account.
+  otherFamily,
 }
 
 /// [ToyListing] for a toy with [advert] ([yours]: it is this account's).
+/// A toy that says it is linked ([ToyAdvert.registered]) and isn't this
+/// account's belongs to another family, whatever it says about pairing;
+/// firmware that doesn't say (null) is listed as before.
 ToyListing toyListingFor(ToyAdvert? advert, {required bool yours}) {
   if (yours) return ToyListing.yours;
+  if (advert?.registered == true) return ToyListing.otherFamily;
   return isSetupCandidate(advert) ? ToyListing.candidate : ToyListing.other;
 }
 
-/// Subtitle of a toy under "Other Smarty toys nearby".
+/// Subtitle of a toy under "Other Smarty toys nearby" that isn't linked to
+/// an account ([ToyListing.other]): its buttons still open pairing.
 const String otherToySubtitle =
     'Set up with another phone — hold + and – on it to pair';
 
+/// Subtitle of a toy linked to another account ([ToyListing.otherFamily]).
+const String otherFamilySubtitle = 'Set up by another family';
+
+/// Heading of the explanation when a [ToyListing.otherFamily] toy is tapped.
+const String otherFamilyHeading = 'This Smarty belongs to another family';
+
+/// The explanation when a [ToyListing.otherFamily] toy is tapped, with the
+/// toy's code ([bleName], e.g. "Smarty-B11E", when known). Pure.
+String otherFamilyMessage(String? bleName) =>
+    "It's linked to their account, so it can't be set up here. First they "
+    'need to remove it from their account (Smarty app → Home → ⋯ → Remove '
+    "from my account) — resetting the toy alone isn't enough. If you can't "
+    'reach them, contact '
+    'office@hey-smarty.com with the code on the toy '
+    '(${normalizeBleName(bleName) ?? 'Smarty-XXXX'}).';
+
 /// Heading over the toys that aren't waiting to pair.
 const String otherToysHeading = 'Other Smarty toys nearby';
+
+/// Whether the toys under "Other Smarty toys nearby" (their [listings])
+/// already tell the parent how to pair — a toy that isn't linked says to
+/// hold its buttons ([otherToySubtitle]) — so no hint repeats it (see
+/// [scanHintFor]'s `othersNearby`). Another family's toy
+/// ([ToyListing.otherFamily]) says nothing about the parent's own. Pure.
+bool othersShowHowToPair(Iterable<ToyListing> listings) =>
+    listings.contains(ToyListing.other);
 
 /// Whether to connect to a lone toy by ourselves on its advert alone: only
 /// when exactly one is offered AND it says it is waiting to pair. Never for
@@ -157,8 +213,9 @@ enum ScanHint {
   /// again.
   stoppedWaiting,
 
-  /// ~10 s with nothing found while reconnecting ([SetupMode.reconnect]): a
-  /// toy that knows this phone only needs to be on and close.
+  /// ~10 s without the account's own toy (reconnecting, or setting up with
+  /// a toy on the account): it only needs to be on and close — and free: it
+  /// talks to one phone at a time.
   stillLookingForYours,
 }
 
@@ -173,20 +230,34 @@ const Duration scanStoppedWaitingAfter = pairingWindow;
 /// this Smarty any more".
 const Duration reconnectWayOutAfter = Duration(seconds: 30);
 
+/// Whether the page is after the account's own toy — a linked toy, which a
+/// phone of the account pairs with by just connecting (no buttons): when
+/// reconnecting it, or setting up with a toy already on the account
+/// ([accountHasToys]; e.g. Try again after an old connection). Not for "Set
+/// up a different Smarty". Pure.
+bool lookingForYoursIn(SetupMode mode, {required bool accountHasToys}) =>
+    switch (mode) {
+      SetupMode.reconnect => true,
+      SetupMode.setUp => accountHasToys,
+      SetupMode.newToy => false,
+    };
+
 /// Which hint to show [elapsed] after the parent started (or restarted)
 /// looking. [anyListed]: a toy is in the main list (its tile says what to
 /// do). [othersNearby]: toys that aren't waiting to pair are shown under
 /// "Other Smarty toys nearby" — their subtitle already says to hold the
-/// buttons, so no hint repeats it. [reconnect]: [SetupMode.reconnect].
+/// buttons, so no hint repeats it. [lookingForYours]: the page is after the
+/// account's own toy ([SetupMode.reconnect], or [SetupMode.setUp] with a toy
+/// on the account) — a linked toy: no button hold.
 ScanHint scanHintFor(
   Duration elapsed, {
   required bool anyListed,
   bool othersNearby = false,
-  bool reconnect = false,
+  bool lookingForYours = false,
 }) {
   if (anyListed || othersNearby) return ScanHint.none;
   if (elapsed < scanStillLookingAfter) return ScanHint.none;
-  if (reconnect) return ScanHint.stillLookingForYours;
+  if (lookingForYours) return ScanHint.stillLookingForYours;
   if (elapsed >= scanStoppedWaitingAfter) return ScanHint.stoppedWaiting;
   return ScanHint.stillLooking;
 }
@@ -198,8 +269,15 @@ String? scanHintText(ScanHint hint) => switch (hint) {
   ScanHint.stoppedWaiting =>
     'Smarty stopped waiting. Hold the + and – buttons again.',
   ScanHint.stillLookingForYours =>
-    'Still looking — make sure Smarty is on and close to your phone.',
+    'Still looking — make sure Smarty is on and close to your phone. '
+        '$otherPhoneConnectedLine',
 };
+
+/// Part of [ScanHint.stillLookingForYours]: the toy talks to one phone at a
+/// time, and doesn't show up while it does.
+const String otherPhoneConnectedLine =
+    'If Smarty is connected to another phone right now, close the Smarty app '
+    'on that phone, then try again.';
 
 /// What leads the "looking" part of the page: [spinner] (still looking /
 /// connecting), [found] (a check mark), or neither (the look has stopped).
@@ -448,15 +526,14 @@ String? wifiDecisionMessage(WifiDecision d, {String? ssid}) => switch (d) {
 };
 
 /// Last step of every "old connection" (pairingBroken) explanation. The toy
-/// keeps its pairings when the buttons are held (firmware §3.11), so
+/// keeps its pairings when its pairing window opens (firmware §3.11), so
 /// pairingBroken only follows a phone-side forget — the toy still knows this
-/// phone and re-pairs on Try again — or a factory reset (10 s hold); a toy
-/// with no pairings left waits to pair for as long as it is on. A toy that
-/// still knows another phone only takes a new one after the 3-second hold
-/// ([pairingWindow]).
-const String pairingRepairFinalStep =
-    "Then tap Try again. If Smarty doesn't show up, hold the + and – buttons "
-    'for 3 seconds.';
+/// phone and re-pairs on Try again — or a factory reset / the toy erasing
+/// itself after being removed from its account; a toy with no pairings left
+/// waits to pair for as long as it is on. No button hold here: a toy linked
+/// to the account ignores it — if the toy refuses on Try again, the setup
+/// page says what to do ([connectAdviceFor]).
+const String pairingRepairFinalStep = 'Then tap Try again.';
 
 /// What the parent does about a pairing the toy no longer knows, one step per
 /// entry, without the leading "Your phone remembers an old connection to
@@ -519,6 +596,8 @@ String connectFailureMessage(ConnectFailure kind, {required bool isIOS}) {
       return 'Turn on Bluetooth on your phone to reach Smarty';
     case ConnectFailure.needsPermission:
       return 'Allow Bluetooth so the app can talk to Smarty';
+    case ConnectFailure.notYourAccount:
+      return notConfirmedMessage;
     case ConnectFailure.unknown:
       return "We couldn't finish connecting. Keep Smarty close to your phone "
           'and try again.';
@@ -534,12 +613,19 @@ enum ConnectAdvice {
   /// and the [pairingBrokenStepList] (iOS: forget Smarty in Settings).
   forgetOldPairing,
 
-  /// The toy refused to pair — it was set up with another phone and isn't
-  /// waiting to pair: [setUpWithAnotherPhoneMessage].
+  /// A toy linked to an account turned this phone away: it turned down this
+  /// phone's account proof ([ConnectFailure.notYourAccount]), or refused to
+  /// pair after no proof could be given. [notConfirmedMessage], with
+  /// [resetAndSetUpAgainLine] under it. (Its buttons can't open pairing.)
+  notConfirmed,
+
+  /// A toy that isn't linked (or doesn't say) refused to pair — it was set
+  /// up with another phone and isn't waiting to pair:
+  /// [setUpWithAnotherPhoneMessage].
   holdButtons,
 
-  /// The link just didn't come up, with a toy that said it isn't waiting to
-  /// pair: [maybeAnotherPhoneMessage].
+  /// The link just didn't come up, with a toy that isn't linked (or doesn't
+  /// say) and said it isn't waiting to pair: [maybeAnotherPhoneMessage].
   maybeHoldButtons,
 
   /// The plain line for the failure ([connectFailureMessage]).
@@ -555,36 +641,57 @@ enum ConnectAdvice {
 ///   phone there is no old pairing to forget).
 /// - [advertPairing]: what the toy said about waiting to pair just before
 ///   (null = not reported).
+/// - [registered]: what the toy said about being linked to an account just
+///   before ([ToyAdvert.registered]; null = not reported).
 ///
-/// A refused pairing ([ConnectFailure.pairingBroken]) means "forget the old
-/// pairing" only when the phone said so, or when the toy said it IS waiting
-/// to pair (it would have taken a new pairing, so the old one on this phone
-/// is what got in the way). Otherwise, for the account's own toy or a toy
-/// that said it isn't waiting to pair, it was set up with another phone:
-/// hold the buttons. Anything else keeps the old-pairing steps.
+/// The toy turning down this phone's account proof
+/// ([ConnectFailure.notYourAccount]) means the account isn't the toy's:
+/// [ConnectAdvice.notConfirmed]. A refused pairing
+/// ([ConnectFailure.pairingBroken]) means "forget the old pairing" only
+/// when the phone said so, or when the toy said it IS waiting to pair (it
+/// would have taken a new pairing, so the old one on this phone is what got
+/// in the way). Otherwise a linked toy didn't take this phone as its
+/// account's: [ConnectAdvice.notConfirmed] (its buttons can't open
+/// pairing). For the account's own toy that isn't linked, or a toy that
+/// said it isn't waiting to pair, it was set up with another phone: hold
+/// the buttons. Anything else keeps the old-pairing steps. A link that just
+/// didn't come up with a toy that isn't linked and isn't waiting to pair
+/// may be the same: [ConnectAdvice.maybeHoldButtons].
 ConnectAdvice connectAdviceFor(
   ConnectFailure kind, {
   bool staleBond = false,
   bool yours = false,
   bool? advertPairing,
+  bool? registered,
 }) {
+  final bool linked = registered == true;
   switch (kind) {
+    case ConnectFailure.notYourAccount:
+      return ConnectAdvice.notConfirmed;
     case ConnectFailure.pairingBroken:
       if (staleBond || advertPairing == true) {
         return ConnectAdvice.forgetOldPairing;
       }
+      if (linked) return ConnectAdvice.notConfirmed;
       if (yours || advertPairing == false) return ConnectAdvice.holdButtons;
       return ConnectAdvice.forgetOldPairing;
     case ConnectFailure.unknown:
-      return advertPairing == false
-          ? ConnectAdvice.maybeHoldButtons
-          : ConnectAdvice.plain;
+      if (linked || advertPairing != false) return ConnectAdvice.plain;
+      return ConnectAdvice.maybeHoldButtons;
     default:
       return ConnectAdvice.plain;
   }
 }
 
-/// [ConnectAdvice.holdButtons]: the toy was set up with another phone.
+/// [ConnectAdvice.notConfirmed] (and [ConnectFailure.notYourAccount]):
+/// this phone couldn't prove the toy is its account's. Shown with
+/// [resetAndSetUpAgainLine] under it on the setup page.
+const String notConfirmedMessage =
+    "Couldn't confirm this is your Smarty. Check you're signed in with the "
+    'account it was set up with, then tap Try again.';
+
+/// [ConnectAdvice.holdButtons]: a toy that isn't linked, set up with another
+/// phone.
 const String setUpWithAnotherPhoneMessage =
     'This Smarty was set up with another phone. Hold the + and – buttons on '
     'it for 3 seconds, then tap Try again.';

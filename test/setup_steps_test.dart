@@ -48,19 +48,32 @@ void main() {
       }
     });
 
-    test('reconnecting: one gentle nudge from 10 s, never "stopped waiting"',
-        () {
+    test('looking for the account\'s own toy: one gentle nudge from 10 s, '
+        'never "stopped waiting" (no buttons to hold)', () {
       expect(
           scanHintFor(const Duration(seconds: 9),
-              anyListed: false, reconnect: true),
+              anyListed: false, lookingForYours: true),
           ScanHint.none);
       for (final elapsed in [
         const Duration(seconds: 10),
         const Duration(minutes: 5),
       ]) {
-        expect(scanHintFor(elapsed, anyListed: false, reconnect: true),
+        expect(scanHintFor(elapsed, anyListed: false, lookingForYours: true),
             ScanHint.stillLookingForYours,
             reason: '$elapsed');
+      }
+    });
+  });
+
+  group('lookingForYoursIn', () {
+    test('reconnecting: always; setting up: when the account has a toy; a '
+        'different Smarty: never', () {
+      for (final has in [true, false]) {
+        expect(lookingForYoursIn(SetupMode.reconnect, accountHasToys: has),
+            isTrue);
+        expect(lookingForYoursIn(SetupMode.setUp, accountHasToys: has), has);
+        expect(
+            lookingForYoursIn(SetupMode.newToy, accountHasToys: has), isFalse);
       }
     });
   });
@@ -72,8 +85,16 @@ void main() {
           'Still looking — did you hold both buttons?');
       expect(scanHintText(ScanHint.stoppedWaiting),
           'Smarty stopped waiting. Hold the + and – buttons again.');
+      // The toy talks to one phone at a time.
       expect(scanHintText(ScanHint.stillLookingForYours),
-          'Still looking — make sure Smarty is on and close to your phone.');
+          'Still looking — make sure Smarty is on and close to your phone. If '
+          'Smarty is connected to another phone right now, close the Smarty '
+          'app on that phone, then try again.');
+      expect(otherPhoneConnectedLine,
+          'If Smarty is connected to another phone right now, close the '
+          'Smarty app on that phone, then try again.');
+      expect(scanHintText(ScanHint.stillLookingForYours),
+          isNot(contains('hold')));
     });
 
     test('no hint says "isn\'t ready to pair" any more', () {
@@ -87,6 +108,7 @@ void main() {
   group('timing', () {
     test('toy pairing window and nudges', () {
       expect(pairingWindow, const Duration(seconds: 120));
+      expect(pairingWindow, BleManager.toyPairingWindow);
       expect(scanStillLookingAfter, const Duration(seconds: 10));
       expect(scanStoppedWaitingAfter, pairingWindow);
       expect(autoSelectDelay, const Duration(milliseconds: 600));
@@ -101,8 +123,22 @@ void main() {
           'Smarty will wait 2 minutes for your phone.');
       expect(reconnectFirstLine,
           'Turn Smarty on and keep it close to your phone.');
-      expect(reconnectButtonHoldLine,
-          'New phone? Also hold the + and – buttons together for 3 seconds.');
+      // A second phone of the account just connects: nothing to do on the
+      // first phone, no buttons to hold.
+      expect(newPhoneLine,
+          'Using a new phone? Just sign in with the same account — Smarty '
+          'will let it pair.');
+      expect(newPhoneLine, isNot(contains('hold')));
+      expect(newPhoneLine, isNot(contains('⋯')));
+    });
+
+    test('the two-step factory reset', () {
+      expect(factoryResetGesture,
+          'hold + and – for 10 seconds, let go, then hold them again for 3 '
+          'seconds');
+      expect(resetAndSetUpAgainLine,
+          'Reset Smarty: hold + and – for 10 seconds, let go, then hold them '
+          'again for 3 seconds. Then set it up again.');
     });
 
     test('setup copy has no jargon', () {
@@ -110,9 +146,16 @@ void main() {
         setupFirstBootLine,
         setupButtonHoldLine,
         reconnectFirstLine,
-        reconnectButtonHoldLine,
+        newPhoneLine,
+        otherPhoneConnectedLine,
         otherToySubtitle,
         otherToysHeading,
+        otherFamilySubtitle,
+        otherFamilyHeading,
+        otherFamilyMessage(null),
+        otherFamilyMessage('Smarty-B11E'),
+        notConfirmedMessage,
+        resetAndSetUpAgainLine,
         setUpWithAnotherPhoneMessage,
         maybeAnotherPhoneMessage,
         notYourToyMessage,
@@ -302,12 +345,16 @@ void main() {
       expect(android, isNot(contains('Settings')));
     });
 
-    test('pairingBroken always ends with Try again, then the button hold as '
-        'the fallback (a reset toy stops waiting after its pairing window)',
-        () {
-      const ending = "Then tap Try again. If Smarty doesn't show up, hold the "
-          '+ and – buttons for 3 seconds.';
+    test('pairingBroken always ends with Try again — and no button hold: a '
+        "toy linked to the account ignores it (the setup page's advice "
+        'covers a refusal)', () {
+      const ending = 'Then tap Try again.';
       expect(pairingRepairFinalStep, ending);
+      for (final ios in [true, false]) {
+        for (final step in pairingBrokenStepList(isIOS: ios)) {
+          expect(step, isNot(contains('hold')), reason: step);
+        }
+      }
       for (final ios in [true, false]) {
         expect(
             connectFailureMessage(ConnectFailure.pairingBroken, isIOS: ios),
@@ -369,16 +416,44 @@ void main() {
   });
 
   group('toyListingFor', () {
-    const pairing = ToyAdvert(pairing: true, version: 1);
-    const notPairing = ToyAdvert(pairing: false, version: 1);
+    const pairing = ToyAdvert(pairing: true, registered: false, version: 1);
+    const notPairing = ToyAdvert(pairing: false, registered: false, version: 1);
+    const linked = ToyAdvert(pairing: false, registered: true, version: 1);
+    const linkedPairing = ToyAdvert(pairing: true, registered: true, version: 1);
 
     test("the account's own toy is \"Your Smarty\" whatever its pairing bit",
         () {
       for (final advert in [pairing, notPairing, null,
-          const ToyAdvert(version: 1)]) {
+          const ToyAdvert(version: 1), linked, linkedPairing]) {
         expect(toyListingFor(advert, yours: true), ToyListing.yours,
             reason: '$advert');
       }
+    });
+
+    test("linked to an account that isn't ours → another family's, whatever "
+        'it says about pairing (never connected)', () {
+      expect(toyListingFor(linked, yours: false), ToyListing.otherFamily);
+      expect(toyListingFor(linkedPairing, yours: false),
+          ToyListing.otherFamily);
+      // From real advert bytes: flags bit2 = linked.
+      expect(
+          toyListingFor(
+              ToyAdvert.fromServiceData({BleManager.smartyServiceGuid: [0x04, 0x01]}),
+              yours: false),
+          ToyListing.otherFamily);
+      expect(
+          toyListingFor(
+              ToyAdvert.fromServiceData({BleManager.smartyServiceGuid: [0x05, 0x01]}),
+              yours: false),
+          ToyListing.otherFamily);
+    });
+
+    test('firmware that says nothing about being linked: as before', () {
+      expect(toyListingFor(null, yours: false), ToyListing.candidate);
+      expect(toyListingFor(const ToyAdvert(pairing: false), yours: false),
+          ToyListing.other);
+      expect(toyListingFor(const ToyAdvert(pairing: true), yours: false),
+          ToyListing.candidate);
     });
 
     test('other toys: waiting to pair (or not saying) → a candidate', () {
@@ -398,6 +473,39 @@ void main() {
       expect(otherToysHeading, 'Other Smarty toys nearby');
       expect(otherToySubtitle,
           'Set up with another phone — hold + and – on it to pair');
+      expect(otherFamilySubtitle, 'Set up by another family');
+      expect(otherFamilyHeading, 'This Smarty belongs to another family');
+      expect(
+          otherFamilyMessage('smarty-b11e'),
+          "It's linked to their account, so it can't be set up here. First "
+          'they need to remove it from their account (Smarty app → Home → ⋯ '
+          "→ Remove from my account) — resetting the toy alone isn't enough. "
+          "If you can't reach them, contact office@hey-smarty.com with the "
+          'code on the toy '
+          '(Smarty-B11E).');
+      expect(otherFamilyMessage(null), endsWith('(Smarty-XXXX).'));
+      // Nothing there tells a stranger how to get in.
+      expect(otherFamilyMessage(null), isNot(contains('hold')));
+    });
+  });
+
+  group('othersShowHowToPair', () {
+    test("a toy that isn't linked says to hold its buttons: no hint needed",
+        () {
+      expect(othersShowHowToPair([ToyListing.other]), isTrue);
+      expect(othersShowHowToPair([ToyListing.otherFamily, ToyListing.other]),
+          isTrue);
+    });
+
+    test("only another family's toys: they say nothing about the parent's "
+        'own — the hint still comes', () {
+      expect(othersShowHowToPair([ToyListing.otherFamily]), isFalse);
+      expect(othersShowHowToPair(const []), isFalse);
+      expect(
+          scanHintFor(scanStillLookingAfter,
+              anyListed: false,
+              othersNearby: othersShowHowToPair([ToyListing.otherFamily])),
+          ScanHint.stillLooking);
     });
   });
 
@@ -488,7 +596,9 @@ void main() {
               hint: ScanHint.stillLookingForYours, reconnect: true),
           [
             'Looking for your Smarty…',
-            'Still looking — make sure Smarty is on and close to your phone.',
+            'Still looking — make sure Smarty is on and close to your phone. '
+                'If Smarty is connected to another phone right now, close the '
+                'Smarty app on that phone, then try again.',
           ],
           LookIcon.spinner),
       ('one toy listed',
@@ -645,15 +755,108 @@ void main() {
       ('ours, pairing cancelled', ConnectFailure.cancelledByUser, false, true,
           false, ConnectAdvice.plain),
     ];
+    // (The toy doesn't say whether it is linked here — registered null —
+    // or says it isn't: the button hold still works for it.)
     for (final (label, kind, stale, yours, advertPairing, expected) in rows) {
+      for (final registered in [null, false]) {
+        test('$label (linked: $registered)', () {
+          expect(
+            connectAdviceFor(kind,
+                staleBond: stale,
+                yours: yours,
+                advertPairing: advertPairing,
+                registered: registered),
+            expected,
+          );
+        });
+      }
+    }
+
+    // A toy linked to an account: a phone of the account proves it and
+    // pairs; a refusal means the proof wasn't there (or was wrong). Its
+    // buttons can't help.
+    // (label, kind, staleBond, yours, advertPairing) → advice
+    final linkedRows = <(String, ConnectFailure, bool, bool, bool?,
+        ConnectAdvice)>[
+      ('linked, ours, refused, not waiting to pair',
+          ConnectFailure.pairingBroken, false, true, false,
+          ConnectAdvice.notConfirmed),
+      ('linked, ours, refused, pairing not reported',
+          ConnectFailure.pairingBroken, false, true, null,
+          ConnectAdvice.notConfirmed),
+      ('linked, not known as ours, refused', ConnectFailure.pairingBroken,
+          false, false, false, ConnectAdvice.notConfirmed),
+      // The phone said its own old pairing is what got in the way.
+      ('linked, the phone reported a stale pairing',
+          ConnectFailure.pairingBroken, true, true, false,
+          ConnectAdvice.forgetOldPairing),
+      ('linked, refused while waiting to pair', ConnectFailure.pairingBroken,
+          false, true, true, ConnectAdvice.forgetOldPairing),
+      // The link just didn't come up: plain, never the button hold.
+      ('linked, not waiting to pair, unknown failure', ConnectFailure.unknown,
+          false, true, false, ConnectAdvice.plain),
+      ('linked, waiting to pair, unknown failure', ConnectFailure.unknown,
+          false, true, true, ConnectAdvice.plain),
+      ('linked, out of range', ConnectFailure.outOfRange, false, true, false,
+          ConnectAdvice.plain),
+    ];
+    for (final (label, kind, stale, yours, advertPairing, expected)
+        in linkedRows) {
       test(label, () {
         expect(
           connectAdviceFor(kind,
-              staleBond: stale, yours: yours, advertPairing: advertPairing),
+              staleBond: stale,
+              yours: yours,
+              advertPairing: advertPairing,
+              registered: true),
           expected,
         );
       });
     }
+
+    test('the toy turned down the account proof → "couldn\'t confirm", '
+        'whatever else is known', () {
+      for (final registered in [true, false, null]) {
+        for (final stale in [true, false]) {
+          expect(
+            connectAdviceFor(ConnectFailure.notYourAccount,
+                staleBond: stale, yours: true, registered: registered),
+            ConnectAdvice.notConfirmed,
+            reason: 'registered=$registered stale=$stale',
+          );
+        }
+      }
+    });
+
+    test('the 3-second hold only for a toy that isn\'t linked', () {
+      for (final kind in ConnectFailure.values) {
+        for (final pairing in [true, false, null]) {
+          for (final yours in [true, false]) {
+            final ConnectAdvice a = connectAdviceFor(kind,
+                yours: yours, advertPairing: pairing, registered: true);
+            expect(
+                a == ConnectAdvice.holdButtons ||
+                    a == ConnectAdvice.maybeHoldButtons,
+                isFalse,
+                reason: '$kind pairing=$pairing yours=$yours');
+          }
+        }
+      }
+    });
+
+    test('copy: couldn\'t confirm — check the account; the reset as the way '
+        'out; never the 3-second hold', () {
+      expect(notConfirmedMessage,
+          "Couldn't confirm this is your Smarty. Check you're signed in with "
+          'the account it was set up with, then tap Try again.');
+      expect(connectFailureMessage(ConnectFailure.notYourAccount, isIOS: true),
+          notConfirmedMessage);
+      expect(connectFailureMessage(ConnectFailure.notYourAccount, isIOS: false),
+          notConfirmedMessage);
+      expect(notConfirmedMessage, isNot(contains('3 seconds')));
+      expect(notConfirmedMessage, isNot(contains('Settings')));
+      expect(resetAndSetUpAgainLine, contains(factoryResetGesture));
+    });
 
     test('copy: hold the buttons — no Settings steps', () {
       expect(setUpWithAnotherPhoneMessage,

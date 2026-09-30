@@ -1,4 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
+
+import 'known_toys_service.dart';
 
 class AuthService {
   static final AuthService _instance = AuthService._internal();
@@ -35,7 +38,18 @@ class AuthService {
     await _auth.sendPasswordResetEmail(email: email);
   }
 
+  /// Signs out — and first drops the claim keys this phone kept for the
+  /// account (see KnownToysService), so nothing that proves the account to
+  /// its toys stays on the phone.
   Future<void> signOut() async {
+    final String? uid = _auth.currentUser?.uid;
+    if (uid != null) {
+      try {
+        await KnownToysService.clearClaimKeys(uid);
+      } catch (e) {
+        debugPrint('AuthService: dropping claim keys failed: $e');
+      }
+    }
     await _auth.signOut();
   }
 }

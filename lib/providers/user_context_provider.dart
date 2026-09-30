@@ -254,6 +254,47 @@ class UserContextProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Whether to send this phone's copy of the child's profile ([profile]) to
+  /// a toy that was just linked to the account ([signedIn]): whenever there
+  /// is one that the toy can hold ([maxBytes], UTF-8). A toy that needed
+  /// linking was new, reset by hand, or erased itself after being removed
+  /// from an account — its profile is empty, or not this family's — so the
+  /// account's copy is the one that counts. Pure.
+  static bool shouldResendAfterLink({
+    required bool signedIn,
+    required String profile,
+    required int maxBytes,
+  }) =>
+      signedIn &&
+      profile.trim().isNotEmpty &&
+      utf8.encode(profile).length <= maxBytes;
+
+  /// The toy was just linked to this account (setup's link step): send it
+  /// the child's profile this phone keeps for the account, when
+  /// [shouldResendAfterLink]. It is marked pending first — the local copy
+  /// then wins over the toy's — so if Smarty isn't reachable now (the write
+  /// fails, the link just dropped) it goes out the next time Smarty
+  /// connects. Nothing happens without a profile on this phone (e.g. a new
+  /// phone: the profile page then reads Smarty's copy).
+  Future<void> resendAfterLink() async {
+    final String? uid = _uid;
+    if (!shouldResendAfterLink(
+      signedIn: uid != null,
+      profile: _context,
+      maxBytes: BleManager().userContextMaxBytes,
+    )) {
+      return;
+    }
+    debugPrint('UserContextProvider: sending the profile to the newly linked '
+        'Smarty');
+    await _setPendingSync(uid!, true);
+    if (uid != _uid) return;
+    notifyListeners();
+    // Connected: pushes the pending copy now (save() clears the flag once
+    // Smarty has it). Not connected: stays pending for the next connect.
+    await refreshFromDevice();
+  }
+
   /// Save the new context to Smarty over BLE and to the local cache.
   Future<ContextSaveResult> save(String newContext) async {
     // Capture the account now so a switch mid-save can't cache under the

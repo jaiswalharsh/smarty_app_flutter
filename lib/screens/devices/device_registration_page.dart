@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../services/auth_service.dart';
 import '../../services/ble_manager.dart';
 import '../../services/device_registration_service.dart';
+import '../../services/known_toys_service.dart';
+import '../../services/toy_claim.dart';
 import '../auth/login_page.dart';
 
 /// How the account link ended — the result [DeviceRegistrationPage] pops.
@@ -99,6 +103,11 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
       // keeps serving "registered":false); markRegistered also makes
       // BleManager ignore that stale value for the rest of this connection.
       BleManager().markRegistered();
+      // The toy's new claim key (what the account's record now holds), kept
+      // right away: this phone never needs the cloud to prove the account to
+      // the toy it just linked.
+      unawaited(KnownToysService.instance
+          .rememberClaimKey(deviceId, claimKeyFromSecret(result.secret!)));
 
       setState(() => _phase = _Phase.done);
       await Future.delayed(const Duration(milliseconds: 800));

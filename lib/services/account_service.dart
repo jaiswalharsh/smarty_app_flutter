@@ -9,6 +9,7 @@ import '../dev_config.dart';
 import '../providers/user_context_provider.dart';
 import 'auth_service.dart';
 import 'ble_manager.dart';
+import 'known_toys_service.dart';
 
 /// What went wrong with an account action, in terms the page can explain to a
 /// parent. Raw error text is never shown.
@@ -60,13 +61,16 @@ List<String> localAccountDataKeys(String uid) => [
       ...UserContextProvider.accountPrefsKeys(uid),
     ];
 
-/// Removes everything [localAccountDataKeys] lists for [uid]. Keys of other
-/// accounts on the same phone, and app-wide settings (dark mode), are kept.
+/// Removes everything [localAccountDataKeys] lists for [uid], and the claim
+/// keys kept for the account's toys (one per toy — see
+/// KnownToysService.clearClaimKeys). Keys of other accounts on the same
+/// phone, and app-wide settings (dark mode), are kept.
 Future<void> clearLocalAccountData(String uid) async {
   final prefs = await SharedPreferences.getInstance();
   for (final key in localAccountDataKeys(uid)) {
     await prefs.remove(key);
   }
+  await KnownToysService.clearClaimKeys(uid);
 }
 
 /// Sign out of the app. Tears down Bluetooth first so the next account doesn't

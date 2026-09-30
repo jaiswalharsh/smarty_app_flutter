@@ -180,6 +180,9 @@ void main() {
       t.linkUp(at(0));
       expect(t.linkDown(at(300)), LinkDropVerdict.quick);
       t.linkUp(at(10000));
+      // (Paired: an unpaired link dropped 20–60 s in is the toy turning
+      // the phone away — see the claim tests.)
+      t.linkSecured();
       expect(t.linkDown(at(60000)), LinkDropVerdict.normal);
       expect(t.quickDrops, 0);
       t.linkUp(at(70000));

@@ -351,6 +351,31 @@ void main() {
 
     setUp(() => remove = (_) async {});
 
+    test('copy: removing erases Smarty by itself once it is online — wherever '
+        'it is; resetting by hand is only for when it can\'t get online', () {
+      expect(
+          removeToyBody,
+          'Smarty will be removed from your account. The next time it is on '
+          "and online, it erases your child's profile, your Wi-Fi and its "
+          "phone pairings by itself — even if it isn't with you. Someone else "
+          'can then set it up.');
+      expect(
+          offlineResetNote,
+          "If Smarty can't get online, reset it by hand: hold + and – for 10 "
+          'seconds, let go, then hold them again for 3 seconds.');
+      expect(forgetOnIPhoneNote,
+          'On this iPhone, also forget Smarty in Settings → Bluetooth.');
+      expect(keepConversationsLabel,
+          'Keep its conversations in my Conversations tab (for 90 days)');
+      // No more "reset it before handing it on".
+      for (final line in [removeToyBody, offlineResetNote]) {
+        expect(line, isNot(contains('Before handing')), reason: line);
+        for (final jargon in ['device', 'BLE', 'wipe', 'server']) {
+          expect(line, isNot(contains(jargon)), reason: '$jargon: $line');
+        }
+      }
+    });
+
     testWidgets('says what happens; keeping the chats is OFF unless chosen',
         (tester) async {
       await openSheet(tester);
@@ -362,8 +387,9 @@ void main() {
           findsOneWidget);
       expect(tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
           isFalse);
-      expect(find.text(eraseToyNote), findsOneWidget);
-      expect(find.textContaining(eraseToyNoteIOS), findsNothing);
+      expect(find.text(offlineResetNote), findsOneWidget);
+      expect(find.textContaining(forgetOnIPhoneNote), findsNothing);
+      expect(find.textContaining('Before handing'), findsNothing);
       expect(find.text('Remove'), findsOneWidget);
       expect(find.text('Cancel'), findsOneWidget);
     });
@@ -371,7 +397,8 @@ void main() {
     testWidgets('iPhone: also forget it in Settings → Bluetooth',
         (tester) async {
       await openSheet(tester, isIOS: true);
-      expect(find.text('$eraseToyNote $eraseToyNoteIOS'), findsOneWidget);
+      expect(find.text('$offlineResetNote $forgetOnIPhoneNote'),
+          findsOneWidget);
     });
 
     testWidgets('Cancel: nothing removed', (tester) async {

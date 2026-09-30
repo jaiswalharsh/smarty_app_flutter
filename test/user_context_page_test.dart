@@ -259,4 +259,117 @@ void main() {
       );
     });
   });
+
+  // After a factory reset (or erasing itself once removed from an account)
+  // Smarty comes back unlinked with no profile; the setup page links it and
+  // then sends the profile this phone keeps for the account.
+  group('UserContextProvider.resendAfterLink', () {
+    test(
+      'the decision: whenever this phone has a profile the toy can hold',
+      () {
+        bool resend({
+          bool signedIn = true,
+          String profile = 'Loves dinosaurs',
+          int maxBytes = 500,
+        }) => UserContextProvider.shouldResendAfterLink(
+          signedIn: signedIn,
+          profile: profile,
+          maxBytes: maxBytes,
+        );
+        expect(resend(), isTrue);
+        expect(resend(signedIn: false), isFalse);
+        expect(resend(profile: ''), isFalse);
+        expect(resend(profile: '   \n'), isFalse);
+        expect(resend(profile: 'é' * 250), isTrue); // 500 bytes
+        expect(resend(profile: 'é' * 251), isFalse); // 502 bytes
+        expect(resend(profile: 'é' * 251, maxBytes: 1024), isTrue);
+      },
+    );
+
+    test("Smarty connected: this phone's profile is written to it", () async {
+      SharedPreferences.setMockInitialValues({
+        'user_context_parent-a': 'Loves dinosaurs',
+      });
+      // A reset toy has nothing.
+      final provider = makeProvider(readFromToy: () async => '');
+      await provider.debugSetAccount('parent-a');
+
+      await provider.resendAfterLink();
+      expect(written, ['Loves dinosaurs']);
+      expect(reads, 0); // never replaced by the toy's empty copy
+      expect(provider.context, 'Loves dinosaurs');
+      expect(provider.hasPendingSync, isFalse);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('user_context_parent-a'), 'Loves dinosaurs');
+      expect(prefs.getBool('user_context_pending_sync_parent-a'), isNull);
+    });
+
+    test('Smarty out of reach: kept pending — it goes out on the next connect '
+        '(and Smarty\'s empty copy never replaces it)', () async {
+      SharedPreferences.setMockInitialValues({
+        'user_context_parent-a': 'Loves dinosaurs',
+      });
+      final provider = makeProvider(
+        readFromToy: () async => '',
+        toyConnected: false,
+      );
+      await provider.debugSetAccount('parent-a');
+
+      await provider.resendAfterLink();
+      expect(written, isEmpty);
+      expect(provider.hasPendingSync, isTrue);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('user_context_pending_sync_parent-a'), isTrue);
+
+      // Back (e.g. the profile page opens): the phone's copy is pushed.
+      final back = UserContextProvider(
+        readFromToy: () async => '',
+        writeToToy: (text) async {
+          written.add(text);
+          return true;
+        },
+        isToyConnected: () => true,
+      );
+      await back.debugSetAccount('parent-a');
+      expect(back.hasPendingSync, isTrue);
+      await back.refreshFromDevice();
+      expect(written, ['Loves dinosaurs']);
+      expect(back.context, 'Loves dinosaurs');
+      expect(back.hasPendingSync, isFalse);
+    });
+
+    test('the write fails: stays pending', () async {
+      SharedPreferences.setMockInitialValues({
+        'user_context_parent-a': 'Loves dinosaurs',
+      });
+      final provider = UserContextProvider(
+        readFromToy: () async => '',
+        writeToToy: (_) async => false,
+        isToyConnected: () => true,
+      );
+      await provider.debugSetAccount('parent-a');
+      await provider.resendAfterLink();
+      expect(provider.hasPendingSync, isTrue);
+      expect(provider.context, 'Loves dinosaurs');
+    });
+
+    test('no profile on this phone (e.g. a new phone): nothing sent, nothing '
+        'pending', () async {
+      SharedPreferences.setMockInitialValues({});
+      final provider = makeProvider(readFromToy: () async => 'on Smarty');
+      await provider.debugSetAccount('parent-a');
+      await provider.resendAfterLink();
+      expect(written, isEmpty);
+      expect(provider.hasPendingSync, isFalse);
+    });
+
+    test('signed out: nothing sent', () async {
+      SharedPreferences.setMockInitialValues({
+        'user_context_parent-a': 'Loves dinosaurs',
+      });
+      final provider = makeProvider(readFromToy: () async => '');
+      await provider.resendAfterLink();
+      expect(written, isEmpty);
+    });
+  });
 }

@@ -5,16 +5,23 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../dev_config.dart';
 import 'ble_manager.dart';
+import 'toy_claim.dart';
 
 /// A toy linked to the signed-in account (`parents/{uid}/devices/{id}`) —
 /// what lets a freshly installed app (or a new phone) recognise the parent's
-/// own Smarty before connecting to it.
+/// own Smarty before connecting to it, and prove to it that this phone is on
+/// its account ([deviceSecretHash]).
 @immutable
 class KnownToy {
-  const KnownToy({required this.deviceId, this.bleName});
+  const KnownToy({
+    required this.deviceId,
+    this.bleName,
+    this.deviceSecretHash,
+  });
 
   /// The toy's own id (its base MAC as 12 lowercase hex, read over Bluetooth
   /// as ab06) — the id its cloud records are filed under.
@@ -23,6 +30,11 @@ class KnownToy {
   /// The name the toy shows over Bluetooth ("Smarty-B11E"), or null when it
   /// can't be told (see [knownToyFromRecord]).
   final String? bleName;
+
+  /// The record's `device_secret_hash` — the claim key this phone proves
+  /// the account with (see toy_claim.dart) — or null when the record has
+  /// none (or not a well-formed one).
+  final String? deviceSecretHash;
 
   /// Whether a toy advertising [name] is this one (case and surrounding
   /// spaces ignored).
@@ -36,10 +48,11 @@ class KnownToy {
   bool operator ==(Object other) =>
       other is KnownToy &&
       other.deviceId == deviceId &&
-      other.bleName == bleName;
+      other.bleName == bleName &&
+      other.deviceSecretHash == deviceSecretHash;
 
   @override
-  int get hashCode => Object.hash(deviceId, bleName);
+  int get hashCode => Object.hash(deviceId, bleName, deviceSecretHash);
 
   @override
   String toString() => 'KnownToy($deviceId, $bleName)';
@@ -81,15 +94,89 @@ String? normalizeBleName(String? raw) {
 /// One `parents/{uid}/devices/{id}` record as a [KnownToy]: the stored
 /// `ble_name` (registerDevice keeps the name the app saw when it linked the
 /// toy) when it is a real toy name, else the name worked out from the id
-/// ([bleNameFromDeviceId]). Pure.
+/// ([bleNameFromDeviceId]); and its `device_secret_hash` when well-formed
+/// ([isClaimKey]). Pure.
 KnownToy knownToyFromRecord(String id, Map<String, dynamic> data) {
   final Object? stored = data['ble_name'];
+  final Object? hash = data['device_secret_hash'];
   return KnownToy(
     deviceId: id,
     bleName:
         normalizeBleName(stored is String ? stored : null) ??
         bleNameFromDeviceId(id),
+    deviceSecretHash: isClaimKey(hash) ? hash as String : null,
   );
+}
+
+// ---- Claim keys kept on the phone ---------------------------------------------
+//
+// So a phone can prove the account to its toy without the internet, each
+// toy's claim key (`device_secret_hash`) is kept in SharedPreferences under
+// the account: written when the account's records are read, and by the
+// phone that links a toy (worked out from the new secret); dropped when the
+// toy turns it down, is forgotten or removed, and on sign-out.
+
+/// The SharedPreferences key of the claim key of the toy [deviceId] for the
+/// account [uid]. Pure.
+String claimKeyPrefsKey(String uid, String deviceId) =>
+    '${claimKeyPrefsPrefix(uid)}$deviceId';
+
+/// What every claim key of the account [uid] starts with. Pure.
+String claimKeyPrefsPrefix(String uid) => 'toy_claim_key_${uid}_';
+
+/// The claim key among [toys] of the toy [deviceId] — or, without an id,
+/// of the toy called [bleName] (case ignored); null when none has one.
+/// Pure.
+String? claimKeyAmong(
+  List<KnownToy> toys, {
+  String? deviceId,
+  String? bleName,
+}) {
+  for (final t in toys) {
+    final bool match =
+        deviceId != null ? t.deviceId == deviceId : t.matchesName(bleName);
+    if (match && isClaimKey(t.deviceSecretHash)) return t.deviceSecretHash;
+  }
+  return null;
+}
+
+/// The phone's kept claim keys ([keys]: device id → key) as [KnownToy]s,
+/// named after their ids ([bleNameFromDeviceId]) so they can be found by
+/// name too. Malformed ones are left out. Pure.
+List<KnownToy> knownToysFromClaimKeys(Map<String, String> keys) => [
+  for (final e in keys.entries)
+    if (isClaimKey(e.value))
+      KnownToy(
+        deviceId: e.key,
+        bleName: bleNameFromDeviceId(e.key),
+        deviceSecretHash: e.value,
+      ),
+];
+
+/// How the kept claim keys ([kept]: device id → key) change after reading
+/// the account's [toys]: device id → the new key, or null to drop it. Every
+/// toy with a key is written (when it differs); when the answer came from
+/// our server ([authoritative]), keys of toys no longer on the account (or
+/// without a key any more) are dropped too. Pure.
+Map<String, String?> claimKeyCacheChanges({
+  required Map<String, String> kept,
+  required List<KnownToy> toys,
+  required bool authoritative,
+}) {
+  final Map<String, String?> changes = {};
+  final Set<String> withKey = {};
+  for (final t in toys) {
+    final String? key = t.deviceSecretHash;
+    if (!isClaimKey(key)) continue;
+    withKey.add(t.deviceId);
+    if (kept[t.deviceId] != key) changes[t.deviceId] = key;
+  }
+  if (authoritative) {
+    for (final id in kept.keys) {
+      if (!withKey.contains(id)) changes[id] = null;
+    }
+  }
+  return changes;
 }
 
 /// Whether a `parents/{uid}/devices/{id}` record was released by the parent
@@ -277,7 +364,11 @@ typedef ToyRecords =
 /// [KnownToys] from Firestore: `parents/{uid}/devices` (registerDevice
 /// writes a record per linked toy; the parent may read their own). Read once
 /// per account and kept in memory; [forgetCachedToys] after a link changes.
-class KnownToysService implements KnownToys {
+/// Also the [ClaimKeys] BleManager proves the account with: each toy's key
+/// is kept on the phone per account (see [claimKeyPrefsKey]), so a
+/// reconnect works offline once the records have been read — or once this
+/// phone linked the toy ([rememberClaimKey]).
+class KnownToysService implements KnownToys, ClaimKeys {
   KnownToysService({
     FirebaseFirestore? db,
     FirebaseAuth? auth,
@@ -392,6 +483,7 @@ class KnownToysService implements KnownToys {
       if (gen == _gen && (!found.fromCache || toys.isNotEmpty)) {
         _cache[uid] = toys;
       }
+      unawaited(_keepClaimKeys(uid, toys, authoritative: !found.fromCache));
       debugPrint(
         'KnownToys: ${toys.length} on this account '
         '(from cache: ${found.fromCache}) $toys',
@@ -469,6 +561,8 @@ class KnownToysService implements KnownToys {
       '(kept history: $keepHistory)',
     );
     forgetCachedToys();
+    // It erases itself once it hears it was removed: its key is no use.
+    await forgetClaimKey(deviceId: deviceId);
 
     if (_isSavedToy(deviceId, bleName)) {
       try {
@@ -477,6 +571,111 @@ class KnownToysService implements KnownToys {
         // The account part is done; the phone forgets on a later Forget.
         debugPrint('⚠️ KnownToys: forgetting the removed toy failed: $e');
       }
+    }
+  }
+
+  // ---- Claim keys (see [ClaimKeys]) -------------------------------------------
+
+  // The kept claim keys of the account [uid]: device id → key.
+  static Map<String, String> _keptClaimKeys(SharedPreferences prefs, String uid) {
+    final String prefix = claimKeyPrefsPrefix(uid);
+    return {
+      for (final k in prefs.getKeys())
+        if (k.startsWith(prefix) && prefs.get(k) is String)
+          k.substring(prefix.length): prefs.getString(k)!,
+    };
+  }
+
+  Future<void> _keepClaimKeys(
+    String uid,
+    List<KnownToy> toys, {
+    required bool authoritative,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final changes = claimKeyCacheChanges(
+        kept: _keptClaimKeys(prefs, uid),
+        toys: toys,
+        authoritative: authoritative,
+      );
+      for (final MapEntry(key: id, value: key) in changes.entries) {
+        if (key == null) {
+          await prefs.remove(claimKeyPrefsKey(uid, id));
+        } else {
+          await prefs.setString(claimKeyPrefsKey(uid, id), key);
+        }
+      }
+    } catch (e) {
+      debugPrint('KnownToys: keeping claim keys failed: $e');
+    }
+  }
+
+  /// The claim key for the toy [deviceId] / called [bleName]: the one kept
+  /// on this phone for the signed-in account, else from the account's
+  /// records ([knownToysForAccount] — kept for next time). Null when signed
+  /// out, not the account's toy, or no key at hand.
+  @override
+  Future<String?> claimKeyFor({String? deviceId, String? bleName}) async {
+    final String? uid = _uidOrNull();
+    if (uid == null || (deviceId == null && bleName == null)) return null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? kept = claimKeyAmong(
+        knownToysFromClaimKeys(_keptClaimKeys(prefs, uid)),
+        deviceId: deviceId,
+        bleName: bleName,
+      );
+      if (kept != null) return kept;
+    } catch (e) {
+      debugPrint('KnownToys: reading kept claim keys failed: $e');
+    }
+    return claimKeyAmong(
+      await knownToysForAccount(),
+      deviceId: deviceId,
+      bleName: bleName,
+    );
+  }
+
+  /// This phone just linked the toy [deviceId] and knows its new claim key
+  /// ([claimKeyFromSecret] of the secret it wrote): keep it, so this phone
+  /// never needs the cloud to prove the account to it.
+  Future<void> rememberClaimKey(String deviceId, String claimKey) async {
+    final String? uid = _uidOrNull();
+    if (uid == null || !isClaimKey(claimKey)) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(claimKeyPrefsKey(uid, deviceId), claimKey);
+    } catch (e) {
+      debugPrint('KnownToys: keeping the claim key failed: $e');
+    }
+  }
+
+  /// Drops the kept claim key of the toy [deviceId] — or, without an id,
+  /// of the toy called [bleName] — and what was read of the account's toys,
+  /// so the next look-up asks our server.
+  @override
+  Future<void> forgetClaimKey({String? deviceId, String? bleName}) async {
+    forgetCachedToys();
+    final String? uid = _uidOrNull();
+    if (uid == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      for (final t in knownToysFromClaimKeys(_keptClaimKeys(prefs, uid))) {
+        final bool match =
+            deviceId != null ? t.deviceId == deviceId : t.matchesName(bleName);
+        if (match) await prefs.remove(claimKeyPrefsKey(uid, t.deviceId));
+      }
+    } catch (e) {
+      debugPrint('KnownToys: dropping the claim key failed: $e');
+    }
+  }
+
+  /// Drops every claim key kept for the account [uid] (sign-out, account
+  /// deleted).
+  static Future<void> clearClaimKeys(String uid) async {
+    final prefs = await SharedPreferences.getInstance();
+    for (final id in _keptClaimKeys(prefs, uid).keys) {
+      await prefs.remove(claimKeyPrefsKey(uid, id));
     }
   }
 

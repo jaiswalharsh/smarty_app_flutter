@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:smarty_app/home_tab.dart'
     show reconnectOfferLine, reconnectOfferLineFor;
@@ -412,6 +413,209 @@ void main() {
           'You set up a Smarty on this account before.');
       expect(reconnectOfferLine('weird'),
           'You set up a Smarty on this account before.');
+    });
+  });
+
+  group('claim keys (device_secret_hash)', () {
+    const keyA =
+        '6c86c6aac5fb24bcf5d9939cb7d7d5645ce39418f449e03b262dd4fa14b4b92b';
+    const keyB =
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+    test('read along with the name; a malformed one is left out', () {
+      expect(
+        knownToyFromRecord('1cc3abc9b11c', {'device_secret_hash': keyA}),
+        const KnownToy(
+            deviceId: '1cc3abc9b11c',
+            bleName: 'Smarty-B11E',
+            deviceSecretHash: keyA),
+      );
+      for (final bad in [null, '', 'nope', keyA.toUpperCase(), 42]) {
+        expect(
+            knownToyFromRecord('1cc3abc9b11c', {'device_secret_hash': bad})
+                .deviceSecretHash,
+            isNull,
+            reason: '$bad');
+      }
+    });
+
+    test('kept per account and toy', () {
+      expect(claimKeyPrefsKey('parent-a', '1cc3abc9b11c'),
+          'toy_claim_key_parent-a_1cc3abc9b11c');
+      expect(claimKeyPrefsKey('parent-a', '1cc3abc9b11c'),
+          startsWith(claimKeyPrefsPrefix('parent-a')));
+      expect(claimKeyPrefsKey('parent-b', '1cc3abc9b11c'),
+          isNot(startsWith(claimKeyPrefsPrefix('parent-a'))));
+    });
+
+    test('claimKeyAmong: by id, else by name', () {
+      const toys = [
+        KnownToy(
+            deviceId: '1cc3abc9b11c',
+            bleName: 'Smarty-B11E',
+            deviceSecretHash: keyA),
+        KnownToy(deviceId: '0a0b0c0d0e0f', bleName: 'Smarty-0E11'),
+      ];
+      expect(claimKeyAmong(toys, deviceId: '1cc3abc9b11c'), keyA);
+      expect(claimKeyAmong(toys, bleName: 'smarty-b11e'), keyA);
+      // Its id wins over a name.
+      expect(
+          claimKeyAmong(toys, deviceId: '0a0b0c0d0e0f', bleName: 'Smarty-B11E'),
+          isNull);
+      expect(claimKeyAmong(toys, bleName: 'Smarty-0E11'), isNull); // no key
+      expect(claimKeyAmong(toys, bleName: 'Smarty-FFFF'), isNull);
+      expect(claimKeyAmong(toys), isNull);
+    });
+
+    test('kept keys can be found by the name worked out from the id', () {
+      final toys = knownToysFromClaimKeys(
+          {'1cc3abc9b11c': keyA, '0a0b0c0d0e0f': 'broken'});
+      expect(toys, const [
+        KnownToy(
+            deviceId: '1cc3abc9b11c',
+            bleName: 'Smarty-B11E',
+            deviceSecretHash: keyA),
+      ]);
+      expect(claimKeyAmong(toys, bleName: 'Smarty-B11E'), keyA);
+    });
+
+    test('claimKeyCacheChanges: new and changed keys are written; keys of '
+        'toys gone from the account are dropped only on our server\'s word',
+        () {
+      const toys = [
+        KnownToy(deviceId: '1cc3abc9b11c', deviceSecretHash: keyB),
+        KnownToy(deviceId: '0a0b0c0d0e0f', deviceSecretHash: keyA),
+        KnownToy(deviceId: '111111111111'), // no key
+      ];
+      final kept = {
+        '1cc3abc9b11c': keyA, // linked again since: new key
+        '0a0b0c0d0e0f': keyA, // unchanged
+        '222222222222': keyA, // removed from the account
+      };
+      expect(
+        claimKeyCacheChanges(kept: kept, toys: toys, authoritative: true),
+        {'1cc3abc9b11c': keyB, '222222222222': null},
+      );
+      // The phone's offline copy may just not know the record: keep it.
+      expect(
+        claimKeyCacheChanges(kept: kept, toys: toys, authoritative: false),
+        {'1cc3abc9b11c': keyB},
+      );
+      expect(
+        claimKeyCacheChanges(kept: const {}, toys: const [], authoritative: true),
+        isEmpty,
+      );
+    });
+
+    group('KnownToysService', () {
+      late int reads;
+      late Map<String, dynamic> record;
+
+      KnownToysService service({String? uid = 'parent-a'}) {
+        reads = 0;
+        return KnownToysService(
+          currentUid: () => uid,
+          read: (_) async {
+            reads++;
+            return (
+              records: [('1cc3abc9b11c', record)],
+              fromCache: false,
+            );
+          },
+        );
+      }
+
+      setUp(() {
+        SharedPreferences.setMockInitialValues({});
+        record = {'device_secret_hash': keyA};
+      });
+
+      Future<Map<String, Object>> kept() async {
+        final prefs = await SharedPreferences.getInstance();
+        return {
+          for (final k in prefs.getKeys())
+            if (k.startsWith('toy_claim_key_')) k: prefs.get(k)!,
+        };
+      }
+
+      test('reading the account\'s toys keeps their keys on the phone',
+          () async {
+        final s = service();
+        await s.knownToysForAccount();
+        await pumpEventQueue();
+        expect(await kept(), {'toy_claim_key_parent-a_1cc3abc9b11c': keyA});
+      });
+
+      test('the phone\'s key first (works offline); else the account\'s '
+          'records, then kept', () async {
+        SharedPreferences.setMockInitialValues({
+          'toy_claim_key_parent-a_1cc3abc9b11c': keyB,
+        });
+        final s = service();
+        expect(await s.claimKeyFor(bleName: 'Smarty-B11E'), keyB);
+        expect(await s.claimKeyFor(deviceId: '1cc3abc9b11c'), keyB);
+        expect(reads, 0);
+
+        SharedPreferences.setMockInitialValues({});
+        final fresh = service();
+        expect(await fresh.claimKeyFor(bleName: 'Smarty-B11E'), keyA);
+        expect(reads, 1);
+        await pumpEventQueue();
+        expect(await kept(), {'toy_claim_key_parent-a_1cc3abc9b11c': keyA});
+      });
+
+      test('not the account\'s toy, no key, or signed out → null', () async {
+        record = {};
+        final s = service();
+        expect(await s.claimKeyFor(bleName: 'Smarty-B11E'), isNull);
+        expect(await s.claimKeyFor(bleName: 'Smarty-FFFF'), isNull);
+        expect(await s.claimKeyFor(), isNull);
+        expect(await service(uid: null).claimKeyFor(bleName: 'Smarty-B11E'),
+            isNull);
+      });
+
+      test('the phone that links a toy keeps its new key (no cloud needed)',
+          () async {
+        final s = service();
+        await s.rememberClaimKey('1cc3abc9b11c', keyB);
+        await s.rememberClaimKey('0a0b0c0d0e0f', 'not a key');
+        expect(await kept(), {'toy_claim_key_parent-a_1cc3abc9b11c': keyB});
+        expect(await s.claimKeyFor(bleName: 'Smarty-B11E'), keyB);
+        expect(reads, 0);
+      });
+
+      test('a turned-down key is dropped (by id, or by name) and the '
+          'records are read afresh next time', () async {
+        SharedPreferences.setMockInitialValues({
+          'toy_claim_key_parent-a_1cc3abc9b11c': keyB,
+          'toy_claim_key_parent-a_0a0b0c0d0e0f': keyB,
+          'toy_claim_key_parent-b_1cc3abc9b11c': keyB,
+        });
+        final s = service();
+        await s.forgetClaimKey(bleName: 'Smarty-B11E');
+        expect(await kept(), {
+          'toy_claim_key_parent-a_0a0b0c0d0e0f': keyB,
+          'toy_claim_key_parent-b_1cc3abc9b11c': keyB,
+        });
+        await s.forgetClaimKey(deviceId: '0a0b0c0d0e0f');
+        expect(await kept(), {'toy_claim_key_parent-b_1cc3abc9b11c': keyB});
+        expect(await s.claimKeyFor(bleName: 'Smarty-B11E'), keyA);
+        expect(reads, 1);
+      });
+
+      test('sign-out / account deleted: every key of that account goes',
+          () async {
+        SharedPreferences.setMockInitialValues({
+          'toy_claim_key_parent-a_1cc3abc9b11c': keyA,
+          'toy_claim_key_parent-a_0a0b0c0d0e0f': 'broken',
+          'toy_claim_key_parent-b_1cc3abc9b11c': keyB,
+          'smarty_saved_device_id_parent-a': 'AA:BB',
+        });
+        await KnownToysService.clearClaimKeys('parent-a');
+        expect(await kept(), {'toy_claim_key_parent-b_1cc3abc9b11c': keyB});
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString('smarty_saved_device_id_parent-a'), 'AA:BB');
+      });
     });
   });
 }
