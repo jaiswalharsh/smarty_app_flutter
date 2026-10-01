@@ -404,7 +404,7 @@ void main() {
           'This Smarty is still linked to another family.');
       expect(
         ownedElsewhereMessage('smarty-b11e'),
-        'Ask them to open the Smarty app → Home → ⋯ → Remove from my '
+        'Ask them to open the Hey Smarty app → Home → ⋯ → Remove from my '
         "account. If you can't reach them, contact office@hey-smarty.com "
         'with the code on the toy (Smarty-B11E).',
       );

@@ -3,6 +3,8 @@
 
 import 'package:flutter/foundation.dart' show immutable;
 
+import '../../app_info.dart' show appDisplayName;
+
 import '../../services/ble_manager.dart';
 import '../../services/known_toys_service.dart' show normalizeBleName;
 
@@ -132,9 +134,9 @@ const String otherFamilyHeading = 'This Smarty belongs to another family';
 /// toy's code ([bleName], e.g. "Smarty-B11E", when known). Pure.
 String otherFamilyMessage(String? bleName) =>
     "It's linked to their account, so it can't be set up here. First they "
-    'need to remove it from their account (Smarty app → Home → ⋯ → Remove '
-    "from my account) — resetting the toy alone isn't enough. If you can't "
-    'reach them, contact '
+    'need to remove it from their account ($appDisplayName app → Home → ⋯ → '
+    "Remove from my account) — resetting the toy alone isn't enough. If you "
+    "can't reach them, contact "
     'office@hey-smarty.com with the code on the toy '
     '(${normalizeBleName(bleName) ?? 'Smarty-XXXX'}).';
 
@@ -311,8 +313,8 @@ String? scanHintText(ScanHint hint) => switch (hint) {
 /// Part of [ScanHint.stillLookingForYours]: the toy talks to one phone at a
 /// time, and doesn't show up while it does.
 const String otherPhoneConnectedLine =
-    'If Smarty is connected to another phone right now, close the Smarty app '
-    'on that phone, then try again.';
+    'If Smarty is connected to another phone right now, close the '
+    '$appDisplayName app on that phone, then try again.';
 
 /// What leads the "looking" part of the page: [spinner] (still looking /
 /// connecting), [found] (a check mark), or neither (the look has stopped).
@@ -643,8 +645,9 @@ const String pairingBrokenHeading =
 // ---- Bluetooth off / not allowed (Home's card and the setup page) -------------
 
 /// The name iOS Settings lists this app under (CFBundleDisplayName in
-/// ios/Runner/Info.plist): the page every "Open Settings" button lands on.
-const String iosSettingsAppName = 'Smarty App';
+/// ios/Runner/Info.plist — [appDisplayName]): the page every "Open
+/// Settings" button lands on.
+const String iosSettingsAppName = appDisplayName;
 
 /// What to do when Bluetooth is off, on every platform.
 const String bluetoothOffLine =

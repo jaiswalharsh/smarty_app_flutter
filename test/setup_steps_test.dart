@@ -1,5 +1,8 @@
+import 'dart:io' show File;
+
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:smarty_app/app_info.dart';
 import 'package:smarty_app/screens/devices/setup_steps.dart';
 import 'package:smarty_app/services/ble_manager.dart';
 
@@ -88,11 +91,11 @@ void main() {
       // The toy talks to one phone at a time.
       expect(scanHintText(ScanHint.stillLookingForYours),
           'Still looking — make sure Smarty is on and close to your phone. If '
-          'Smarty is connected to another phone right now, close the Smarty '
-          'app on that phone, then try again.');
+          'Smarty is connected to another phone right now, close the Hey '
+          'Smarty app on that phone, then try again.');
       expect(otherPhoneConnectedLine,
           'If Smarty is connected to another phone right now, close the '
-          'Smarty app on that phone, then try again.');
+          'Hey Smarty app on that phone, then try again.');
       expect(scanHintText(ScanHint.stillLookingForYours),
           isNot(contains('hold')));
     });
@@ -545,8 +548,8 @@ void main() {
       expect(
           otherFamilyMessage('smarty-b11e'),
           "It's linked to their account, so it can't be set up here. First "
-          'they need to remove it from their account (Smarty app → Home → ⋯ '
-          "→ Remove from my account) — resetting the toy alone isn't enough. "
+          'they need to remove it from their account (Hey Smarty app → Home → '
+          "⋯ → Remove from my account) — resetting the toy alone isn't enough. "
           "If you can't reach them, contact office@hey-smarty.com with the "
           'code on the toy '
           '(Smarty-B11E).');
@@ -665,7 +668,7 @@ void main() {
             'Looking for your Smarty…',
             'Still looking — make sure Smarty is on and close to your phone. '
                 'If Smarty is connected to another phone right now, close the '
-                'Smarty app on that phone, then try again.',
+                'Hey Smarty app on that phone, then try again.',
           ],
           LookIcon.spinner),
       ('one toy listed',
@@ -946,7 +949,7 @@ void main() {
         'Quickest: swipe down from the top-right corner and tap the Bluetooth '
             'icon.',
         'Open Settings',
-        'This opens Settings → Smarty App. Tap ‹ at the top left until you '
+        'This opens Settings → Hey Smarty. Tap ‹ at the top left until you '
             'see the main Settings page, then tap Bluetooth.',
       ]);
       expect(view.turnsOn, isFalse);
@@ -972,16 +975,31 @@ void main() {
       expect(view.buttonNote, isNull);
     });
 
-    test('the iOS display name matches the one Settings shows', () {
-      // CFBundleDisplayName in ios/Runner/Info.plist.
-      expect(iosSettingsAppName, 'Smarty App');
+    test('the app is "Hey Smarty" everywhere the phone shows its name', () {
+      expect(appDisplayName, 'Hey Smarty');
+      expect(iosSettingsAppName, appDisplayName);
+      // iOS: under the icon and in Settings (CFBundleDisplayName).
+      final String plist = File('ios/Runner/Info.plist').readAsStringSync();
+      expect(
+          RegExp(r'<key>CFBundleDisplayName</key>\s*<string>([^<]*)</string>')
+              .firstMatch(plist)
+              ?.group(1),
+          appDisplayName);
+      // Android: under the icon (the application's label).
+      final String manifest =
+          File('android/app/src/main/AndroidManifest.xml').readAsStringSync();
+      expect(
+          RegExp(r'<application[^>]*android:label="([^"]*)"')
+              .firstMatch(manifest)
+              ?.group(1),
+          appDisplayName);
     });
   });
 
   group('bluetoothPermissionHint', () {
     test("iOS: names the app's Settings page and its Bluetooth switch", () {
       expect(bluetoothPermissionHint(isIOS: true),
-          'In Settings → Smarty App, turn on Bluetooth, then come back.');
+          'In Settings → Hey Smarty, turn on Bluetooth, then come back.');
     });
 
     test('Android: unchanged', () {

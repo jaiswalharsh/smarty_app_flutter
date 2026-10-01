@@ -6,6 +6,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../app_info.dart' show appDisplayName;
 import '../dev_config.dart';
 import 'ble_manager.dart';
 import 'auth_service.dart';
@@ -56,9 +57,9 @@ const String ownedElsewhereHeading =
 /// way to take it over from this phone: its id can be read by anyone nearby,
 /// so a claim without the owner would let anyone take a family's toy. Pure.
 String ownedElsewhereMessage(String? bleName) =>
-    'Ask them to open the Smarty app → Home → ⋯ → Remove from my account. '
-    "If you can't reach them, contact office@hey-smarty.com with the code on "
-    'the toy (${normalizeBleName(bleName) ?? 'Smarty-XXXX'}).';
+    'Ask them to open the $appDisplayName app → Home → ⋯ → Remove from my '
+    "account. If you can't reach them, contact office@hey-smarty.com with the "
+    "code on the toy (${normalizeBleName(bleName) ?? 'Smarty-XXXX'}).";
 
 extension RegistrationFailureMessage on RegistrationFailure {
   /// Parent-facing text: what happened, in everyday words, and what to do.
