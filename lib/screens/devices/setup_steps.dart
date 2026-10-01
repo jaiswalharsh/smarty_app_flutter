@@ -61,12 +61,15 @@ const String newPhoneLine =
 
 // ---- Resetting ------------------------------------------------------------------
 
-/// The factory reset gesture (lower case, to go inside a sentence). Two
-/// steps so it can't happen by accident: three beeps after 10 seconds, five
-/// quick beeps after the second hold. It erases everything on the toy —
-/// phone pairings, Wi-Fi, the child's profile and the account link.
+/// The factory reset gesture (lower case, to go inside a sentence): one
+/// continuous hold, three beeps at 10 seconds, then the wipe. It erases
+/// everything on the toy — phone pairings, Wi-Fi, the child's profile and
+/// the account link. (A release-and-hold-again confirmation was tried on
+/// 2026-10-01 and dropped: parents fumbled it, and an accidental wipe only
+/// costs a two-minute re-setup — the link is in the cloud, the profile on
+/// the phone.)
 const String factoryResetGesture =
-    'hold + and – for 10 seconds, let go, then hold them again for 3 seconds';
+    'hold + and – for 10 seconds until it beeps three times';
 
 /// Under [notConfirmedMessage]: the way out when this account can't prove
 /// the toy is its own (e.g. it was set up with an account nobody can sign

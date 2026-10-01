@@ -132,13 +132,12 @@ void main() {
       expect(newPhoneLine, isNot(contains('⋯')));
     });
 
-    test('the two-step factory reset', () {
+    test('the factory reset gesture: one 10-second hold', () {
       expect(factoryResetGesture,
-          'hold + and – for 10 seconds, let go, then hold them again for 3 '
-          'seconds');
+          'hold + and – for 10 seconds until it beeps three times');
       expect(resetAndSetUpAgainLine,
-          'Reset Smarty: hold + and – for 10 seconds, let go, then hold them '
-          'again for 3 seconds. Then set it up again.');
+          'Reset Smarty: hold + and – for 10 seconds until it beeps three '
+          'times. Then set it up again.');
     });
 
     test('setup copy has no jargon', () {

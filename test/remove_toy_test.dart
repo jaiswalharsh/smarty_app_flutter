@@ -362,7 +362,7 @@ void main() {
       expect(
           offlineResetNote,
           "If Smarty can't get online, reset it by hand: hold + and – for 10 "
-          'seconds, let go, then hold them again for 3 seconds.');
+          'seconds until it beeps three times.');
       expect(forgetOnIPhoneNote,
           'On this iPhone, also forget Smarty in Settings → Bluetooth.');
       expect(keepConversationsLabel,
