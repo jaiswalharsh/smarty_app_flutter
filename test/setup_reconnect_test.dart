@@ -302,7 +302,8 @@ void main() {
       expect(find.text(resetAndSetUpAgainLine), findsOneWidget);
       expect(find.text('Try again'), findsOneWidget);
       expect(find.text(setUpWithAnotherPhoneMessage), findsNothing);
-      expect(find.textContaining('3 seconds.'), findsOneWidget); // the reset
+      // The reset (one 10-second hold until three beeps).
+      expect(find.textContaining('beeps three times'), findsOneWidget);
       expect(find.textContaining('for 3 seconds, then'), findsNothing);
       expect(find.text(pairingBrokenHeading), findsNothing);
       expect(find.textContaining('Add another phone'), findsNothing);

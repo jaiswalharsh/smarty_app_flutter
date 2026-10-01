@@ -13,9 +13,29 @@ import 'package:smarty_app/home_tab.dart';
 import 'package:smarty_app/providers/user_context_provider.dart';
 import 'package:smarty_app/screens/devices/setup_steps.dart';
 import 'package:smarty_app/services/ble_manager.dart';
+import 'package:smarty_app/services/known_toys_service.dart';
 import 'package:smarty_app/utils/theme_provider.dart';
 import 'package:smarty_app/widgets/forget_toy.dart';
 import 'package:smarty_app/widgets/smarty_card.dart';
+
+/// The account's toys, for "Smarty was reset" (the saved toy is one of them).
+class _AccountToys implements KnownToys {
+  _AccountToys(this.toys);
+  final List<KnownToy> toys;
+
+  @override
+  Future<List<KnownToy>> knownToysForAccount() async => List.of(toys);
+
+  @override
+  Future<void> removeFromAccount(String deviceId,
+          {required bool keepHistory}) async {}
+
+  @override
+  bool get offerReconnect => true;
+
+  @override
+  void holdBackReconnectOffer() {}
+}
 
 void main() {
   group('wifiRowInfo', () {
@@ -78,7 +98,8 @@ void main() {
     // Status applied by a test must not leak into the next one.
     tearDown(() => BleManager().debugResetConnectionState());
 
-    Future<void> pumpHome(WidgetTester tester, ToyPhase phase) async {
+    Future<void> pumpHome(WidgetTester tester, ToyPhase phase,
+        {KnownToys? knownToys}) async {
       final toyPhase = ValueNotifier<ToyPhase>(phase);
       addTearDown(toyPhase.dispose);
       await tester.pumpWidget(
@@ -94,7 +115,9 @@ void main() {
                   ),
             ),
           ],
-          child: MaterialApp(home: HomeTab(toyPhase: toyPhase)),
+          child: MaterialApp(
+            home: HomeTab(toyPhase: toyPhase, knownToys: knownToys),
+          ),
         ),
       );
       await tester.pump();
@@ -193,6 +216,63 @@ void main() {
         expect(wifi, lessThan(about));
         expect(about, lessThan(button));
         await unmount(tester);
+      });
+
+      group('reset with its buttons (the account\'s toy, not linked any '
+          'more)', () {
+        const KnownToy b11e =
+            KnownToy(deviceId: '1cc3abc9b11c', bleName: 'Smarty-B11E');
+        setUp(() => BleManager().debugSetSavedToy('NEW-ID', 'Smarty-B11E'));
+        tearDown(() => BleManager().debugSetSavedToy(null, null));
+
+        testWidgets('"Smarty was reset" and "Set up again" in the card', (
+          tester,
+        ) async {
+          await pumpHome(tester, ToyPhase.connected,
+              knownToys: _AccountToys([b11e]));
+          await smartySays(
+              tester, '{"wifi":"No credentials","registered":false}');
+          await tester.pump();
+
+          expect(inCard(find.text(toyWasResetLine)), findsOneWidget);
+          expect(inCard(find.text(toyWasResetBody)), findsOneWidget);
+          expect(inCard(find.text(setUpAgainLabel)), findsOneWidget);
+          expect(find.text('Finish setup'), findsNothing);
+          expect(find.text('Almost done — finish setup'), findsNothing);
+          await unmount(tester);
+        });
+
+        testWidgets('a toy that isn\'t on the account (setup left at "Not '
+            'now"): finish setup, as before', (tester) async {
+          await pumpHome(tester, ToyPhase.connected,
+              knownToys: _AccountToys([
+                const KnownToy(deviceId: '0a0b0c0d0e0f', bleName: 'Smarty-0E11'),
+              ]));
+          await smartySays(
+              tester, '{"wifi":"No credentials","registered":false}');
+          await tester.pump();
+
+          expect(inCard(find.text('Almost done — finish setup')),
+              findsOneWidget);
+          expect(find.text('Finish setup'), findsOneWidget);
+          expect(find.text(toyWasResetLine), findsNothing);
+          expect(find.text(setUpAgainLabel), findsNothing);
+          await unmount(tester);
+        });
+
+        testWidgets('linked again: back to normal', (tester) async {
+          await pumpHome(tester, ToyPhase.connected,
+              knownToys: _AccountToys([b11e]));
+          await smartySays(
+              tester, '{"wifi":"No credentials","registered":true}');
+          await tester.pump();
+
+          expect(inCard(find.text("Smarty isn't on Wi-Fi yet")),
+              findsOneWidget);
+          expect(find.text(toyWasResetLine), findsNothing);
+          expect(find.text(setUpAgainLabel), findsNothing);
+          await unmount(tester);
+        });
       });
 
       testWidgets('not on Wi-Fi: why in the header, "Set up" on the row', (

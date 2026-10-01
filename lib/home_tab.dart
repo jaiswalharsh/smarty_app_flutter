@@ -17,15 +17,42 @@ import 'widgets/numbered_steps.dart';
 import 'widgets/remove_toy.dart';
 import 'widgets/smarty_card.dart';
 
+/// Home's status when the saved toy was reset ([toyWasResetFor]).
+const String toyWasResetLine = 'Smarty was reset';
+
+/// What to do about it, under [toyWasResetLine].
+const String toyWasResetBody = 'Set it up again — it only takes a minute.';
+
+/// The button that does it: the setup page's link step (the account's
+/// records give the toy a new key), then Wi-Fi, then the child's profile.
+const String setUpAgainLabel = 'Set up again';
+
+/// Whether the toy saved on this phone was reset (pure): it is one of the
+/// account's toys ([onAccount]: its name is in the account's records) but it
+/// says it isn't linked — [registered] false once connected, or before that
+/// (null) its recent advert ([advertRegistered]) false. A factory reset with
+/// its buttons erases its key, Wi-Fi and the child's profile, and nothing
+/// tells the account. A toy that was never linked (setup left at "Not
+/// now") isn't on the account: that is "finish setup", not a reset.
+bool toyWasResetFor({
+  required bool onAccount,
+  required bool? registered,
+  bool? advertRegistered,
+}) =>
+    onAccount &&
+    (registered == false || (registered == null && advertRegistered == false));
+
 /// One-line, parent-facing status for the toy on Home's Smarty card ([short]:
 /// the compact form). Plain words only — no "device", "scan", "BLE".
 /// [statusStalled] = a connected toy never answered the status read.
-/// [phase] defaults to [BleManager.phase].
+/// [phase] defaults to [BleManager.phase]. [toyWasReset]: see
+/// [toyWasResetFor].
 String toyStatusLine(
   BleManager ble, {
   bool short = false,
   bool statusStalled = false,
   ToyPhase? phase,
+  bool toyWasReset = false,
 }) {
   final bool seenRecently = ble.savedToySeenRecently;
   return toyStatusLineFor(
@@ -37,6 +64,7 @@ String toyStatusLine(
     statusStalled: statusStalled,
     seenRecently: seenRecently,
     advertWifiUp: seenRecently ? ble.lastSeenAdvert?.wifiUp : null,
+    toyWasReset: toyWasReset,
   );
 }
 
@@ -49,6 +77,9 @@ String toyStatusLine(
 /// [advertWifiUp]: the Wi-Fi flag from that recent advert (null = not
 /// reported); lets a connected toy show "not on Wi-Fi" before its first
 /// status arrives.
+/// [toyWasReset]: the account's toy says it isn't linked ([toyWasResetFor])
+/// — [toyWasResetLine] instead of "finish setup", and instead of "asleep"
+/// when it was just seen saying so.
 String toyStatusLineFor({
   required ToyPhase phase,
   required String wifi,
@@ -59,6 +90,7 @@ String toyStatusLineFor({
   bool linkingEnabled = DevConfig.linkingEnabled,
   bool seenRecently = false,
   bool? advertWifiUp,
+  bool toyWasReset = false,
 }) {
   switch (phase) {
     case ToyPhase.noToy:
@@ -74,6 +106,7 @@ String toyStatusLineFor({
     case ToyPhase.probing:
       return 'Looking for Smarty…';
     case ToyPhase.notNearby:
+      if (linkingEnabled && toyWasReset) return toyWasResetLine;
       if (seenRecently) {
         return short ? 'On — connecting…' : 'Smarty is on — connecting…';
       }
@@ -103,7 +136,7 @@ String toyStatusLineFor({
     return 'Checking on Smarty…';
   }
   if (linkingEnabled && registered == false) {
-    return 'Almost done — finish setup';
+    return toyWasReset ? toyWasResetLine : 'Almost done — finish setup';
   }
   switch (status) {
     // Same words as the setup page (setup_steps.dart).
@@ -242,6 +275,13 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   int _accountToysGen = 0;
   ToyPhase? _lastPhase;
 
+  // ---- The saved toy: one of the account's toys? ---------------------------
+  // For "Smarty was reset" (toyWasResetFor): asked again whenever it may
+  // matter (connected / not nearby, or the toy says it isn't linked) — from
+  // memory after the account's first read.
+  bool _savedToyOnAccount = false;
+  int _savedToyOnAccountGen = 0;
+
   @override
   void initState() {
     super.initState();
@@ -288,6 +328,9 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       _lookUpAccountToys();
     }
     _lastPhase = phase;
+    if (phase == ToyPhase.connected || phase == ToyPhase.notNearby) {
+      _lookUpSavedToyOnAccount();
+    }
     if (phase == ToyPhase.connected) {
       _armWifiStallTimer();
     } else {
@@ -357,8 +400,45 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   void _onRegisteredChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    if (_bleManager.registered == false) _lookUpSavedToyOnAccount();
+    setState(() {});
   }
+
+  // Whether the saved toy is one of the account's toys, by its exact name
+  // (sets [_savedToyOnAccount] and rebuilds when the answer changes).
+  void _lookUpSavedToyOnAccount() {
+    final int gen = ++_savedToyOnAccountGen;
+    final String? name = normalizeBleName(_bleManager.savedToyName);
+    if (name == null) {
+      _savedToyOnAccount = false;
+      return;
+    }
+    _knownToys.knownToysForAccount().then(
+      (toys) {
+        if (!mounted || gen != _savedToyOnAccountGen) return;
+        final bool on = toys.any((t) => t.matchesName(name));
+        if (on != _savedToyOnAccount) {
+          setState(() => _savedToyOnAccount = on);
+        }
+      },
+      onError: (Object e) {
+        debugPrint('HomeTab: is the saved toy on the account: $e');
+      },
+    );
+  }
+
+  // The saved toy was reset (see toyWasResetFor).
+  bool get _toyWasReset =>
+      DevConfig.linkingEnabled &&
+      toyWasResetFor(
+        onAccount: _savedToyOnAccount,
+        registered: _bleManager.registered,
+        advertRegistered:
+            _bleManager.savedToySeenRecently
+                ? _bleManager.lastSeenAdvert?.registered
+                : null,
+      );
 
   // Theme-aware text colours so headings/body copy stay readable in dark mode.
   Color get _headingColor => Theme.of(context).colorScheme.onSurface;
@@ -1061,6 +1141,29 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   // look DID just see the toy (the connect hasn't happened yet, or failed and
   // will be retried), say it's on and connecting instead.
   Widget _buildNotNearbyView() {
+    if (_toyWasReset) {
+      // Just seen saying it isn't linked: set it up again — the setup page
+      // finds it, pairs, links it to the account again, then Wi-Fi.
+      return _buildMessageView(
+        phase: ToyPhase.notNearby,
+        status: toyWasResetLine,
+        icon: Icons.restart_alt,
+        iconColor: Colors.orange.shade400,
+        body: toyWasResetBody,
+        actions: [
+          _buildPrimaryButton(
+            label: setUpAgainLabel,
+            icon: Icons.restart_alt,
+            onPressed: _openConnectionPage,
+          ),
+          SizedBox(height: 12),
+          _buildTextAction(
+            'Set up a different Smarty',
+            () => _openConnectionPage(newToy: true),
+          ),
+        ],
+      );
+    }
     final bool seen = _bleManager.savedToySeenRecently;
     return _buildMessageView(
       phase: ToyPhase.notNearby,
@@ -1123,6 +1226,9 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         DevConfig.linkingEnabled &&
         !_waitingForStatus &&
         _bleManager.registered == false;
+    // The account's toy, reset: say so, and set it up again (same flow as
+    // "Finish setup": link, Wi-Fi, the child's profile).
+    final bool wasReset = needsLinkStep && _toyWasReset;
 
     return _buildCardView(
       phase: ToyPhase.connected,
@@ -1130,6 +1236,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         _bleManager,
         statusStalled: _wifiStatusStalled,
         phase: ToyPhase.connected,
+        toyWasReset: wasReset,
       ),
       // No spinner once the advert has already told us "not on Wi-Fi", nor
       // during a pull (its own spinner shows).
@@ -1143,11 +1250,19 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         pullRefreshing: _pullRefreshing,
       ),
       footer: [
+        if (wasReset) ...[
+          Text(
+            toyWasResetBody,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 16, color: _secondaryTextColor),
+          ),
+          SizedBox(height: 12),
+        ],
         if (needsLinkStep)
           Center(
             child: _buildPrimaryButton(
-              label: 'Finish setup',
-              icon: Icons.check_circle_outline,
+              label: wasReset ? setUpAgainLabel : 'Finish setup',
+              icon: wasReset ? Icons.restart_alt : Icons.check_circle_outline,
               onPressed: _openConnectionPage,
             ),
           ),

@@ -246,10 +246,11 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   Timer? _wifiStartingTimer;
   Timer? _wifiDeadlineTimer;
   WifiDecision _wifiDecision = WifiDecision.checking;
-  // Open the network list by itself if this check ends in
-  // [WifiDecision.pickNetwork]: the first check after the link (once per
-  // page), and Try again — not after the parent came back from the list.
-  bool _openListOnPick = false;
+  // Open the network list by itself if this check ends in a decision that
+  // leads there ([wifiDecisionOpensList]): the first check after the link
+  // (once per page), and Try again — not after the parent came back from
+  // the list.
+  bool _openListOnAnswer = false;
   bool _listOpenedByItself = false;
 
   @override
@@ -1136,9 +1137,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
       if (_stage == _Stage.done || _wifiPageOpen) return;
       _evaluateWifi(gen);
     });
-    // Smarty isn't on Wi-Fi and we stop waiting: straight to the network
-    // list — once per page.
-    _openListOnPick = !_listOpenedByItself;
+    // Smarty has no Wi-Fi to join (or we stop waiting): straight to the
+    // network list — once per page.
+    _openListOnAnswer = !_listOpenedByItself;
     _startWifiCheck(gen);
   }
 
@@ -1210,9 +1211,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         // e.g. it joins its saved Wi-Fi later and setup finishes by itself).
         _cancelWifiTimers();
         _wifiAnswered = true;
-        final bool openList =
-            d == WifiDecision.pickNetwork && _openListOnPick;
-        _openListOnPick = false;
+        final bool openList = wifiDecisionOpensList(d) && _openListOnAnswer;
+        _openListOnAnswer = false;
         if (_stage != _Stage.wifiNeeded || _wifiDecision != d) {
           setState(() {
             _stage = _Stage.wifiNeeded;
@@ -1224,7 +1224,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (_stale(gen) ||
                 _stage != _Stage.wifiNeeded ||
-                _wifiDecision != WifiDecision.pickNetwork ||
+                _wifiDecision != d ||
                 ModalRoute.of(context)?.isCurrent != true) {
               return;
             }
@@ -1240,7 +1240,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
   void _recheckWifi({required bool retrying}) {
     final int gen = _flowGen;
     if (_stale(gen)) return;
-    _openListOnPick = retrying;
+    _openListOnAnswer = retrying;
     setState(() => _stage = _Stage.checkingWifi);
     _startWifiCheck(gen, retrying: retrying);
   }
@@ -1249,11 +1249,12 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     if (_wifiPageOpen) return;
     final int gen = _flowGen;
     _wifiPageOpen = true;
-    // The step gave up waiting: say so over the list.
-    final String? intro = _stage == _Stage.wifiNeeded &&
-            _wifiDecision == WifiDecision.pickNetwork
-        ? wifiPickNetworkLine
-        : null;
+    // Why the list is open (no Wi-Fi saved, or the step stopped waiting):
+    // said over the list.
+    final String? intro =
+        _stage == _Stage.wifiNeeded && wifiDecisionOpensList(_wifiDecision)
+            ? wifiDecisionMessage(_wifiDecision)
+            : null;
     final bool? joined;
     try {
       // WifiNetworkPage pops `true` once the toy has actually joined.
@@ -1274,7 +1275,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     }
     // Back without joining: check where the toy stands now — without opening
     // the list again by itself.
-    _openListOnPick = false;
+    _openListOnAnswer = false;
     _startWifiCheck(gen);
   }
 

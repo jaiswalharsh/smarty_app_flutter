@@ -463,8 +463,9 @@ enum WifiDecision {
   /// starting / joining its saved Wi-Fi.
   checking,
 
-  /// No Wi-Fi saved on the toy: "Last step: connect Smarty to your home
-  /// Wi-Fi…" [Connect Wi-Fi] [Later].
+  /// No Wi-Fi saved on the toy: the network list, with "Last step: connect
+  /// Smarty to your home Wi-Fi…" on top (the setup page opens it; back from
+  /// it: the same line, [Connect Wi-Fi] [Later]).
   needsSetup,
 
   /// The saved Wi-Fi refused the password: [Try again] [Use a different
@@ -560,6 +561,14 @@ const String wifiCheckingLabel = 'Checking whether Smarty is already on Wi-Fi…
 /// network list, and on the setup page when the parent comes back from it.
 const String wifiPickNetworkLine =
     "Smarty isn't on Wi-Fi yet. Pick your network.";
+
+/// Whether the setup page opens the network list by itself for [d] (once
+/// per page, and on Try again): Smarty has no Wi-Fi saved
+/// ([WifiDecision.needsSetup] — e.g. it was reset), or the step stopped
+/// waiting ([WifiDecision.pickNetwork]). The decision's message
+/// ([wifiDecisionMessage]) is said over the list. Pure.
+bool wifiDecisionOpensList(WifiDecision d) =>
+    d == WifiDecision.needsSetup || d == WifiDecision.pickNetwork;
 
 /// The name to use for the toy's saved network in messages.
 String _wifiNameFor(String? ssid) {

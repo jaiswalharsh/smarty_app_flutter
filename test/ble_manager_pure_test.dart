@@ -6,6 +6,8 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:smarty_app/services/ble_manager.dart';
+import 'package:smarty_app/services/known_toys_service.dart'
+    show normalizeBleName;
 import 'package:smarty_app/services/toy_claim.dart';
 
 void main() {
@@ -364,6 +366,92 @@ void main() {
       // The check may have answered before the link finished.
       expect(derive(true, null, linked: true, accountHasToy: false), isTrue);
       expect(derive(false, false, linked: true, accountHasToy: false), isTrue);
+    });
+  });
+
+  group('the saved toy under a new Bluetooth identity', () {
+    const String savedId = '11111111-1111-1111-1111-111111111111';
+    const String newId = '22222222-2222-2222-2222-222222222222';
+    const String newerId = '33333333-3333-3333-3333-333333333333';
+
+    ScanResult seen(String id, String name,
+            {DateTime? at, bool nameInAdvert = true}) =>
+        ScanResult(
+          device: BluetoothDevice.fromId(id),
+          advertisementData: AdvertisementData(
+            advName: nameInAdvert ? name : '',
+            txPowerLevel: null,
+            appearance: null,
+            connectable: true,
+            manufacturerData: const {},
+            // pairing=1, registered=0, wifiUp=0; ver 1 — as after a reset.
+            serviceData: {Guid('abcd'): [0x01, 0x01]},
+            serviceUuids: [Guid('abcd')],
+          ),
+          rssi: -50,
+          timeStamp: at ?? DateTime(2026, 10, 1, 21),
+        );
+
+    ScanResult? find(String? savedName, List<ScanResult> results) =>
+        BleManager.savedToyUnderNewIdentity(
+            savedId: savedId, savedName: savedName, results: results);
+
+    test('not seen under its saved identity, but exactly its name is: the '
+        'same toy', () {
+      final r = seen(newId, 'Smarty-B11E');
+      expect(find('Smarty-B11E', [r]), same(r));
+      // Spelling is normalised ("smarty-b11e" is the same name).
+      expect(find('smarty-b11e', [r]), same(r));
+      expect(find('Smarty-B11E', [seen(newId, 'SMARTY-B11E')]), isNotNull);
+    });
+
+    test('its saved identity is there: nothing to re-key', () {
+      expect(
+          find('Smarty-B11E',
+              [seen(savedId, 'Smarty-B11E'), seen(newId, 'Smarty-B11E')]),
+          isNull);
+    });
+
+    test('nothing looser than the exact name', () {
+      for (final name in [
+        'Smarty-B11F', 'Smarty-B11', 'Smarty-B11E2', 'Smarty', 'Smarty B11E ',
+        'Smarty-0E11', '',
+      ]) {
+        final ScanResult? r = find('Smarty-B11E', [seen(newId, name)]);
+        // "Smarty B11E " normalises to the same name — that one counts.
+        expect(r != null, normalizeBleName(name) == 'Smarty-B11E',
+            reason: '"$name"');
+      }
+    });
+
+    test('a saved name that isn\'t a real toy name never matches', () {
+      for (final saved in [null, '', 'Smarty']) {
+        expect(find(saved, [seen(newId, 'Smarty-B11E')]), isNull,
+            reason: '$saved');
+      }
+    });
+
+    test('the name from the scan when the advert has none', () {
+      // A device known to FBP keeps its platform name; one never seen has
+      // none — then it can't be matched.
+      expect(
+          find('Smarty-B11E',
+              [seen(newId, 'Smarty-B11E', nameInAdvert: false)]),
+          isNull);
+    });
+
+    test('several identities with its name: the latest advert', () {
+      final older = seen(newId, 'Smarty-B11E', at: DateTime(2026, 10, 1, 21));
+      final newer = seen(newerId, 'Smarty-B11E',
+          at: DateTime(2026, 10, 1, 21, 0, 5));
+      expect(find('Smarty-B11E', [older, newer]), same(newer));
+      expect(find('Smarty-B11E', [newer, older]), same(newer));
+    });
+
+    test('another toy around changes nothing', () {
+      final mine = seen(newId, 'Smarty-B11E');
+      expect(find('Smarty-B11E', [seen(newerId, 'Smarty-0E11'), mine]),
+          same(mine));
     });
   });
 

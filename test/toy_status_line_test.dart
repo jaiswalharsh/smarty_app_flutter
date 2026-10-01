@@ -156,6 +156,74 @@ void main() {
       }
     });
 
+    group('the account\'s toy was reset (buttons)', () {
+      test('toyWasResetFor: on the account and says it isn\'t linked', () {
+        bool reset({bool onAccount = true, bool? registered,
+                bool? advertRegistered}) =>
+            toyWasResetFor(
+              onAccount: onAccount,
+              registered: registered,
+              advertRegistered: advertRegistered,
+            );
+        // Connected: its status says it.
+        expect(reset(registered: false), isTrue);
+        // Not connected yet: its advert just said it.
+        expect(reset(advertRegistered: false), isTrue);
+        // Linked, or can't tell: no.
+        expect(reset(registered: true), isFalse);
+        expect(reset(), isFalse);
+        expect(reset(advertRegistered: true), isFalse);
+        // Once connected the toy's own status wins over the advert.
+        expect(reset(registered: true, advertRegistered: false), isFalse);
+        // Not on the account (setup left at "Not now"): finish setup instead.
+        expect(reset(onAccount: false, registered: false), isFalse);
+        expect(reset(onAccount: false, advertRegistered: false), isFalse);
+      });
+
+      test('the copy', () {
+        expect(toyWasResetLine, 'Smarty was reset');
+        expect(toyWasResetBody, 'Set it up again — it only takes a minute.');
+        expect(setUpAgainLabel, 'Set up again');
+      });
+
+      test('connected and not linked: "Smarty was reset" instead of "finish '
+          'setup"', () {
+        String line({bool wasReset = true, bool linking = true,
+                String wifi = 'No credentials'}) =>
+            toyStatusLineFor(
+              phase: ToyPhase.connected,
+              wifi: wifi,
+              registered: false,
+              linkingEnabled: linking,
+              toyWasReset: wasReset,
+            );
+        expect(line(), toyWasResetLine);
+        expect(line(wifi: 'HomeNet'), toyWasResetLine);
+        expect(line(wasReset: false), 'Almost done — finish setup');
+        // Still waiting for the first status: checking, as always.
+        expect(line(wifi: 'Unknown'), 'Checking on Smarty…');
+        // Dev builds without the account link: nothing to set up again.
+        expect(line(linking: false, wifi: 'HomeNet'), 'Ready to play');
+      });
+
+      test('not nearby, just seen saying so: "Smarty was reset", not '
+          '"asleep"', () {
+        for (final seen in [true, false]) {
+          expect(
+            toyStatusLineFor(
+              phase: ToyPhase.notNearby,
+              wifi: '',
+              registered: null,
+              seenRecently: seen,
+              linkingEnabled: true,
+              toyWasReset: true,
+            ),
+            toyWasResetLine,
+          );
+        }
+      });
+    });
+
     test('never uses jargon', () {
       for (final phase in ToyPhase.values) {
         for (final short in [true, false]) {

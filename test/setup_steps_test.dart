@@ -321,6 +321,22 @@ void main() {
       });
     }
 
+    test('the network list opens by itself for no Wi-Fi saved, and when '
+        'the step stops waiting — never for a problem the toy may fix itself',
+        () {
+      for (final d in WifiDecision.values) {
+        expect(
+          wifiDecisionOpensList(d),
+          d == WifiDecision.needsSetup || d == WifiDecision.pickNetwork,
+          reason: d.name,
+        );
+        // What it opens with, said over the list.
+        if (wifiDecisionOpensList(d)) {
+          expect(wifiDecisionMessage(d), isNotNull, reason: d.name);
+        }
+      }
+    });
+
     test('a retry never says "checking" — nothing to wait for again', () {
       for (final status in [
         null, 'Unknown', 'Initializing', 'Reconnecting', 'No credentials',

@@ -9,7 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../dev_config.dart';
 import '../utils/wifi_utils.dart';
 import 'ble_service.dart';
-import 'known_toys_service.dart' show KnownToysService;
+import 'known_toys_service.dart' show KnownToysService, normalizeBleName;
 import 'link_check_service.dart';
 import 'toy_claim.dart';
 
@@ -597,7 +597,9 @@ class BleManager {
   // Launch/resume probe scan ownership (see _probeScan / cancelProbe).
   int _probeToken = 0;
   StreamSubscription<List<ScanResult>>? _probeSub;
-  Completer<bool>? _probeFound;
+  // The probe's answer: the saved toy's advert (under its saved identity or
+  // a new one — see [savedToyUnderNewIdentity]), or null for "not seen".
+  Completer<ScanResult?>? _probeFound;
 
   // The device whose background autoConnect we armed, its connection-state
   // listener, and the backoff re-arm timer after a failed attempt.
@@ -2008,6 +2010,14 @@ class BleManager {
   @visibleForTesting
   void debugResetConnectionState() => _resetConnectionState();
 
+  /// Tests only: the toy saved on this phone ([id] = its Bluetooth id,
+  /// [name] = "Smarty-B11E"), in memory; nulls = none.
+  @visibleForTesting
+  void debugSetSavedToy(String? id, String? name) {
+    _savedToyId = id;
+    _savedToyName = name;
+  }
+
   // Write the free-form user context string to Smarty (char 0xAB03).
   // Uses an acknowledged (long, if needed) write so the BLE stack surfaces
   // failures. Throws [ArgumentError] if the UTF-8 encoding exceeds
@@ -2398,10 +2408,23 @@ class BleManager {
     }
     final prefs = await SharedPreferences.getInstance();
     final id = device.remoteId.str;
+    final String? previousId = prefs.getString(_deviceIdKeyFor(uid));
     await prefs.setString(_deviceIdKeyFor(uid), id);
-    await prefs.setString(_deviceNameKeyFor(uid), device.platformName);
+    // Never overwrite the toy's name with nothing: it is how the toy is
+    // recognised under a new identity (see savedToyUnderNewIdentity). A
+    // different toy whose name isn't known yet doesn't keep the old one's.
+    final bool otherToy = previousId != id;
+    if (device.platformName.isNotEmpty) {
+      await prefs.setString(_deviceNameKeyFor(uid), device.platformName);
+    } else if (otherToy) {
+      await prefs.remove(_deviceNameKeyFor(uid));
+    }
     _savedToyId = id;
-    if (device.platformName.isNotEmpty) _savedToyName = device.platformName;
+    if (device.platformName.isNotEmpty) {
+      _savedToyName = device.platformName;
+    } else if (otherToy) {
+      _savedToyName = 'Smarty';
+    }
     _loadAdvVersion(prefs, id);
     // A different toy is now saved: its own last Wi-Fi name (if any), never
     // the previous toy's.
@@ -2545,7 +2568,10 @@ class BleManager {
   /// 3. [ToyPhase.probing]: (a) saved toy already connected to the app or the
   ///    OS (e.g. after a hot restart) → initialize; (b) otherwise scan up to
   ///    [probeScanDuration] for its advert → direct connect
-  ///    ([directConnectTimeout]) → initialize.
+  ///    ([directConnectTimeout]) → initialize. A toy seen only under a new
+  ///    Bluetooth identity with exactly its name (reset, and forgotten in the
+  ///    phone's Bluetooth settings — see [savedToyUnderNewIdentity]) is saved
+  ///    under that identity and connected the same way.
   /// 4. Not seen → [ToyPhase.notNearby] with `connect(autoConnect: true)` left
   ///    pending (no timeout): the toy connects by itself when it wakes up.
   ///
@@ -2665,10 +2691,11 @@ class BleManager {
       // Pending autoConnect already fired while we were getting here?
       if (_initializeFuture != null || _connectedDevice != null) return;
 
-      // (b) Quick scan for the saved toy's advert.
-      final bool seen;
+      // (b) Quick scan for the saved toy's advert — under its saved
+      // identity, or a new one (see [savedToyUnderNewIdentity]).
+      final ScanResult? sighting;
       try {
-        seen = await _probeScan(device);
+        sighting = await _probeScan(device);
       } catch (e) {
         final kind = classifyConnectError(e);
         if (gen != _sessionGen) return;
@@ -2687,11 +2714,21 @@ class BleManager {
       if (gen != _sessionGen) return;
       if (_initializeFuture != null || _connectedDevice != null) return;
 
-      if (seen) {
+      if (sighting != null) {
+        BluetoothDevice target = device;
+        if (sighting.device.remoteId != device.remoteId) {
+          // The same toy under a new Bluetooth identity (e.g. reset with its
+          // buttons and forgotten in the phone's Bluetooth settings): carry
+          // on with it as this account's toy.
+          target = sighting.device;
+          await _rekeySavedToy(sighting);
+          if (gen != _sessionGen) return;
+        }
         // Direct connect is much faster than autoConnect's background scans.
-        // Cancel the pending request first so we don't issue two connects.
-        await _cancelPendingConnect(switchingTo: device);
-        await _connectAndInitQuietly(device, gen);
+        // Cancel the pending request first (the old identity's, after a
+        // re-key) so we don't issue two connects.
+        await _cancelPendingConnect(switchingTo: target);
+        await _connectAndInitQuietly(target, gen);
         return;
       }
 
@@ -2721,23 +2758,24 @@ class BleManager {
     await _armPendingConnect(device);
   }
 
-  // Scan up to [probeScanDuration] for [device]'s advert. Returns true on the
-  // first sighting. Throws on scan errors (e.g. permission) for the caller to
-  // classify. Skips (returns false) if another screen is already scanning, so
-  // a resume never kills the setup page's scan — the pending autoConnect
-  // covers that case.
+  // Scan up to [probeScanDuration] for [device]'s advert. Returns the first
+  // sighting — of [device] itself, or of the same toy under a new Bluetooth
+  // identity ([savedToyUnderNewIdentity]) — or null. Throws on scan errors
+  // (e.g. permission) for the caller to classify. Skips (returns null) if
+  // another screen is already scanning, so a resume never kills the setup
+  // page's scan — the pending autoConnect covers that case.
   //
   // FBP has ONE scan: startScan replaces whatever runs and stopScan stops it,
   // whoever started it. So the probe holds an owner token: a screen that
   // needs the scanner calls [cancelProbe] first, after which this probe
   // ignores results (they're the screen's) and leaves the scan running.
-  Future<bool> _probeScan(BluetoothDevice device) async {
+  Future<ScanResult?> _probeScan(BluetoothDevice device) async {
     if (FlutterBluePlus.isScanningNow) {
       debugPrint("BleManager: another scan is running — skipping probe scan");
-      return false;
+      return null;
     }
     final int token = ++_probeToken;
-    final found = Completer<bool>();
+    final found = Completer<ScanResult?>();
     _probeFound = found;
     final sub = FlutterBluePlus.onScanResults.listen((results) {
       if (found.isCompleted) return;
@@ -2746,10 +2784,16 @@ class BleManager {
       for (final r in results) {
         if (r.device.remoteId == device.remoteId) {
           _recordSighting(r);
-          found.complete(true);
+          found.complete(r);
           return;
         }
       }
+      final ScanResult? moved = savedToyUnderNewIdentity(
+        savedId: device.remoteId.str,
+        savedName: _savedToyName,
+        results: results,
+      );
+      if (moved != null) found.complete(moved);
     }, onError: (Object e) {
       debugPrint("⚠️ BleManager: probe scan stream error: $e");
     });
@@ -2762,10 +2806,10 @@ class BleManager {
         withRemoteIds: Platform.isAndroid ? [device.remoteId.str] : const [],
         timeout: probeScanDuration,
       );
-      if (token != _probeToken) return false; // cancelled while starting
+      if (token != _probeToken) return null; // cancelled while starting
       return await found.future.timeout(
         probeScanDuration + const Duration(milliseconds: 300),
-        onTimeout: () => false,
+        onTimeout: () => null,
       );
     } finally {
       await sub.cancel();
@@ -2797,7 +2841,70 @@ class BleManager {
     final sub = _probeSub;
     _probeSub = null;
     unawaited(sub?.cancel());
-    if (!found.isCompleted) found.complete(false);
+    if (!found.isCompleted) found.complete(null);
+  }
+
+  /// The saved toy seen under a new Bluetooth identity (pure): none of
+  /// [results] comes from the saved identity ([savedId]), but one carries
+  /// exactly the saved toy's name ([savedName], normalised — "Smarty-B11E").
+  /// The name comes from the toy's own MAC, so it is unique per toy; nothing
+  /// looser counts (no partial names, no plain "Smarty"). A toy that was
+  /// reset — and forgotten in the phone's Bluetooth settings — comes back
+  /// under a new address, which the phone sees as a different device. When
+  /// several identities carry the name (its address changes again while no
+  /// phone is paired), the most recent advert wins. null when the saved
+  /// identity is among [results], or nothing else matches.
+  static ScanResult? savedToyUnderNewIdentity({
+    required String savedId,
+    required String? savedName,
+    required List<ScanResult> results,
+  }) {
+    final String? name = normalizeBleName(savedName);
+    if (name == null) return null;
+    if (results.any((r) => r.device.remoteId.str == savedId)) return null;
+    ScanResult? best;
+    for (final r in results) {
+      final String adv = r.advertisementData.advName;
+      final String seen = adv.isNotEmpty ? adv : r.device.platformName;
+      if (normalizeBleName(seen) != name) continue;
+      if (best == null || r.timeStamp.isAfter(best.timeStamp)) best = r;
+    }
+    return best;
+  }
+
+  // The saved toy is back under a new Bluetooth identity ([r], see
+  // [savedToyUnderNewIdentity]): save it under that one (in memory and for
+  // the account), carrying over what is kept per toy, and drop what belonged
+  // to the old identity — its pairing (and a pending repair of it) is gone
+  // with it. The caller cancels the old background connect.
+  Future<void> _rekeySavedToy(ScanResult r) async {
+    final String? oldId = _savedToyId;
+    final String newId = r.device.remoteId.str;
+    if (oldId == null || oldId == newId) return;
+    debugPrint("🔁 BleManager: $_savedToyName is back under a new Bluetooth "
+        "identity ($oldId → $newId) — same toy (same name), saved under the "
+        "new one");
+    _savedToyId = newId;
+    if (_repairToyId == oldId) _repairToyId = null;
+    _advVersionByToy.remove(oldId);
+    final String? toyId = _toyDeviceIdByRemote[oldId];
+    if (toyId != null) _toyDeviceIdByRemote[newId] = toyId;
+    if (_lastWifiToyId == oldId) _lastWifiToyId = newId;
+    _recordSighting(r);
+    final String? uid = _uid;
+    if (uid == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_deviceIdKeyFor(uid), newId);
+      final String? lastWifi = prefs.getString(_lastWifiKeyFor(oldId));
+      if (lastWifi != null) {
+        await prefs.setString(_lastWifiKeyFor(newId), lastWifi);
+      }
+      await prefs.remove(_lastWifiKeyFor(oldId));
+      await prefs.remove(_advVersionKeyFor(oldId));
+    } catch (e) {
+      debugPrint("⚠️ BleManager: couldn't save the toy's new identity: $e");
+    }
   }
 
   /// Direct-connect [device] (skipped if already connected) and [initialize]
