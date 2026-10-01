@@ -394,12 +394,15 @@ void main() {
       expect(pairingBrokenSteps(isIOS: false), isNot(startsWith('1.')));
     });
 
-    test('iOS Bluetooth-off hint: Control Centre, or Settings the long way',
+    test('Bluetooth off / not allowed: the same lines as the Bluetooth views',
         () {
-      expect(bluetoothOffHintIOS,
-          startsWith('Swipe down from the top-right corner'));
-      expect(bluetoothOffHintIOS, contains('Open Settings, then ‹'));
-      expect(bluetoothOffHintIOS, endsWith('then tap Bluetooth.'));
+      for (final ios in [true, false]) {
+        expect(connectFailureMessage(ConnectFailure.bluetoothOff, isIOS: ios),
+            bluetoothOffLine);
+        expect(
+            connectFailureMessage(ConnectFailure.needsPermission, isIOS: ios),
+            bluetoothPermissionLine);
+      }
     });
 
     test('every kind has plain copy without jargon', () {
@@ -867,6 +870,59 @@ void main() {
           startsWith("We couldn't finish connecting."));
       expect(maybeAnotherPhoneMessage, isNot(contains('Settings')));
       expect(notYourToyMessage, contains('Try again'));
+    });
+  });
+
+  group('bluetoothOffViewFor', () {
+    test('iOS: Control Center first, then Open Settings with where it lands '
+        'right under it', () {
+      final view = bluetoothOffViewFor(isIOS: true);
+      expect(view.texts, [
+        'Turn on Bluetooth on your phone to reach Smarty.',
+        'Quickest: swipe down from the top-right corner and tap the Bluetooth '
+            'icon.',
+        'Open Settings',
+        'This opens Settings → Smarty App. Tap ‹ at the top left until you '
+            'see the main Settings page, then tap Bluetooth.',
+      ]);
+      expect(view.turnsOn, isFalse);
+    });
+
+    test("iOS: never claims the button opens Settings → Bluetooth (it can't)",
+        () {
+      for (final line in bluetoothOffViewFor(isIOS: true).texts) {
+        expect(line, isNot(contains('Settings → Bluetooth')), reason: line);
+      }
+      // It names the page it really opens: the app's own, as iOS lists it.
+      expect(bluetoothOffSettingsNoteIOS, contains(iosSettingsAppName));
+      // "‹", not "‹ Settings": on newer iOS the back button first says "Apps".
+      expect(bluetoothOffSettingsNoteIOS, isNot(contains('‹ Settings')));
+    });
+
+    test('Android: one line and "Turn on" (the system dialog) — no Settings '
+        'walk-through', () {
+      final view = bluetoothOffViewFor(isIOS: false);
+      expect(view.texts, [bluetoothOffLine, 'Turn on']);
+      expect(view.turnsOn, isTrue);
+      expect(view.quickStep, isNull);
+      expect(view.buttonNote, isNull);
+    });
+
+    test('the iOS display name matches the one Settings shows', () {
+      // CFBundleDisplayName in ios/Runner/Info.plist.
+      expect(iosSettingsAppName, 'Smarty App');
+    });
+  });
+
+  group('bluetoothPermissionHint', () {
+    test("iOS: names the app's Settings page and its Bluetooth switch", () {
+      expect(bluetoothPermissionHint(isIOS: true),
+          'In Settings → Smarty App, turn on Bluetooth, then come back.');
+    });
+
+    test('Android: unchanged', () {
+      expect(bluetoothPermissionHint(isIOS: false),
+          'In Settings, turn on Bluetooth for this app, then come back.');
     });
   });
 }

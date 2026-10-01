@@ -1656,7 +1656,9 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     );
   }
 
-  // Same copy as Home's Bluetooth views.
+  // Same copy as Home's Bluetooth views (setup_steps.dart). Bluetooth off on
+  // iOS: Control Center first; "Open Settings" can only open this app's page,
+  // and says so under it.
   Widget _buildBlocker(ToyPhase blocker) {
     final bool isIOS = Platform.isIOS;
     if (blocker == ToyPhase.needsPermission) {
@@ -1665,8 +1667,8 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         iconColor: Colors.blue.shade400,
         // Heading = the state (as on Home's card); text = what to do.
         heading: 'Bluetooth permission needed',
-        text: 'Allow Bluetooth so the app can talk to Smarty',
-        hint: 'In Settings, turn on Bluetooth for this app, then come back.',
+        text: bluetoothPermissionLine,
+        hint: bluetoothPermissionHint(isIOS: isIOS),
         actions: [
           _primaryButton(
             'Open Settings',
@@ -1676,23 +1678,26 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         ],
       );
     }
+    final BluetoothOffView view = bluetoothOffViewFor(isIOS: isIOS);
     return _buildMessage(
       icon: Icons.bluetooth_disabled,
       iconColor: Colors.blue.shade400,
       heading: 'Bluetooth is off',
-      text: 'Turn on Bluetooth on your phone to reach Smarty',
-      // iOS: "Open Settings" can only open this app's page in Settings.
-      hint: isIOS ? bluetoothOffHintIOS : null,
+      text: view.line,
+      hint: view.quickStep,
       actions: [
         _primaryButton(
-          isIOS ? 'Open Settings' : 'Turn on',
-          isIOS ? Icons.settings : Icons.bluetooth,
+          view.buttonLabel,
+          view.turnsOn ? Icons.bluetooth : Icons.settings,
           () => unawaited(_ble.requestBluetoothOn()),
         ),
       ],
+      actionNote: view.buttonNote,
     );
   }
 
+  /// [actionNote]: a line right under the [actions] (where a button goes,
+  /// when its label can't say).
   Widget _buildMessage({
     required IconData icon,
     required Color iconColor,
@@ -1701,6 +1706,7 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
     List<String>? steps,
     String? hint,
     required List<Widget> actions,
+    String? actionNote,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1744,6 +1750,14 @@ class SmartyConnectionPageState extends State<SmartyConnectionPage> {
         ],
         const SizedBox(height: 20),
         for (final a in actions) Center(child: a),
+        if (actionNote != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            actionNote,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 14, color: _secondaryTextColor),
+          ),
+        ],
       ],
     );
   }

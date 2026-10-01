@@ -558,7 +558,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   }
 
   // Bluetooth-off fix: Android can show the system "turn on" dialog; iOS has
-  // no API for that, so we can only open Settings.
+  // no API for that, so we can only open this app's page in Settings.
   void _turnOnBluetooth() {
     unawaited(_bleManager.requestBluetoothOn());
   }
@@ -773,7 +773,9 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   // A saved toy that needs something done: the card, with the state in its
   // header ([status]) and, in its footer, the state's icon, what to do
-  // ([body], or [bodySteps] as a numbered list), a [hint], and [actions].
+  // ([body], or [bodySteps] as a numbered list), a [hint], [actions], and an
+  // [actionNote] right under them (where a button goes, when its label can't
+  // say).
   Widget _buildMessageView({
     required ToyPhase phase,
     required String status,
@@ -783,6 +785,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     List<String>? bodySteps,
     String? hint,
     required List<Widget> actions,
+    String? actionNote,
   }) {
     final TextStyle bodyStyle = TextStyle(
       fontSize: 16,
@@ -808,6 +811,14 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         ],
         SizedBox(height: 16),
         for (final a in actions) Center(child: a),
+        if (actionNote != null) ...[
+          SizedBox(height: 8),
+          Text(
+            actionNote,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 14, color: _secondaryTextColor),
+          ),
+        ],
       ],
     );
   }
@@ -1004,23 +1015,25 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     );
   }
 
+  // Same copy as the setup page (bluetoothOffViewFor). iOS: Control Center
+  // first; "Open Settings" can only open this app's page, and says so under it.
   Widget _buildBluetoothOffView() {
-    final bool isIOS = Platform.isIOS;
+    final BluetoothOffView view = bluetoothOffViewFor(isIOS: Platform.isIOS);
     return _buildMessageView(
       phase: ToyPhase.bluetoothOff,
       status: 'Bluetooth is off on this phone',
       icon: Icons.bluetooth_disabled,
       iconColor: Colors.blue.shade400,
-      body: 'Turn on Bluetooth on your phone to reach Smarty',
-      // iOS: "Open Settings" can only open this app's page in Settings.
-      hint: isIOS ? bluetoothOffHintIOS : null,
+      body: view.line,
+      hint: view.quickStep,
       actions: [
         _buildPrimaryButton(
-          label: isIOS ? 'Open Settings' : 'Turn on',
-          icon: isIOS ? Icons.settings : Icons.bluetooth,
+          label: view.buttonLabel,
+          icon: view.turnsOn ? Icons.bluetooth : Icons.settings,
           onPressed: _turnOnBluetooth,
         ),
       ],
+      actionNote: view.buttonNote,
     );
   }
 
@@ -1030,8 +1043,8 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       status: 'Bluetooth permission needed',
       icon: Icons.bluetooth_searching,
       iconColor: Colors.blue.shade400,
-      body: 'Allow Bluetooth so the app can talk to Smarty',
-      hint: 'In Settings, turn on Bluetooth for this app, then come back.',
+      body: bluetoothPermissionLine,
+      hint: bluetoothPermissionHint(isIOS: Platform.isIOS),
       actions: [
         _buildPrimaryButton(
           label: 'Open Settings',

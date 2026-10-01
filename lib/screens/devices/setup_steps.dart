@@ -568,13 +568,97 @@ String pairingBrokenSteps({required bool isIOS}) {
 const String pairingBrokenHeading =
     'Your phone remembers an old connection to Smarty.';
 
-/// iOS hint under "Bluetooth is off" (Home and the setup page). The Open
-/// Settings button there can only open this app's own page in Settings, so
-/// say how to get from there to Bluetooth.
-const String bluetoothOffHintIOS =
-    'Swipe down from the top-right corner and tap the Bluetooth icon. Or tap '
-    'Open Settings, then ‹ at the top left until you see the main Settings '
-    'page, then tap Bluetooth.';
+// ---- Bluetooth off / not allowed (Home's card and the setup page) -------------
+
+/// The name iOS Settings lists this app under (CFBundleDisplayName in
+/// ios/Runner/Info.plist): the page every "Open Settings" button lands on.
+const String iosSettingsAppName = 'Smarty App';
+
+/// What to do when Bluetooth is off, on every platform.
+const String bluetoothOffLine =
+    'Turn on Bluetooth on your phone to reach Smarty.';
+
+/// iOS: the quickest way to turn Bluetooth on — Control Center, from any
+/// screen — so it comes first, above the button.
+const String bluetoothOffQuickStepIOS =
+    'Quickest: swipe down from the top-right corner and tap the Bluetooth '
+    'icon.';
+
+/// iOS: the line right under the Open Settings button, saying where it really
+/// lands. iOS allows no link to Settings → Bluetooth: an app can only open
+/// its own page in Settings (app_settings does that for every type, the
+/// Bluetooth one included), so walk back from there. ("‹" rather than
+/// "‹ Settings": on newer iOS the back button first says "Apps".) The one way
+/// straight to the Bluetooth page is iOS's own "Turn On Bluetooth" alert as
+/// the app starts (see BleService.configureBeforeFirstUse).
+const String bluetoothOffSettingsNoteIOS =
+    'This opens Settings → $iosSettingsAppName. Tap ‹ at the top left until '
+    'you see the main Settings page, then tap Bluetooth.';
+
+/// The "Bluetooth is off" message on one platform (pure; see
+/// [bluetoothOffViewFor]): [line], then [quickStep] when there is a faster
+/// way than the button, the button ([buttonLabel]), and [buttonNote] right
+/// under it when its label alone can't say where it goes.
+@immutable
+class BluetoothOffView {
+  const BluetoothOffView({
+    required this.line,
+    required this.buttonLabel,
+    required this.turnsOn,
+    this.quickStep,
+    this.buttonNote,
+  });
+
+  final String line;
+  final String? quickStep;
+  final String buttonLabel;
+
+  /// The button turns Bluetooth on by itself (Android's system dialog);
+  /// otherwise it opens Settings.
+  final bool turnsOn;
+  final String? buttonNote;
+
+  /// Every line of text it shows, in order (for tests).
+  List<String> get texts => [
+    line,
+    if (quickStep != null) quickStep!,
+    buttonLabel,
+    if (buttonNote != null) buttonNote!,
+  ];
+
+  @override
+  String toString() => 'BluetoothOffView($texts)';
+}
+
+/// "Bluetooth is off" for the platform (pure). Android: one line and "Turn
+/// on", which asks the system to turn Bluetooth on. iOS has no API for that
+/// and no link to Settings → Bluetooth, so Control Center leads, and "Open
+/// Settings" says right under it that it opens this app's page.
+BluetoothOffView bluetoothOffViewFor({required bool isIOS}) => isIOS
+    ? const BluetoothOffView(
+        line: bluetoothOffLine,
+        quickStep: bluetoothOffQuickStepIOS,
+        buttonLabel: 'Open Settings',
+        turnsOn: false,
+        buttonNote: bluetoothOffSettingsNoteIOS,
+      )
+    : const BluetoothOffView(
+        line: bluetoothOffLine,
+        buttonLabel: 'Turn on',
+        turnsOn: true,
+      );
+
+/// What to do when the app isn't allowed to use Bluetooth.
+const String bluetoothPermissionLine =
+    'Allow Bluetooth so the app can talk to Smarty';
+
+/// The hint under "Bluetooth permission needed", above its Open Settings
+/// button. That button opens this app's own page in Settings — the right
+/// place this time: on iOS the Bluetooth switch for the app is on that page,
+/// so name the page and the switch.
+String bluetoothPermissionHint({required bool isIOS}) => isIOS
+    ? 'In Settings → $iosSettingsAppName, turn on Bluetooth, then come back.'
+    : 'In Settings, turn on Bluetooth for this app, then come back.';
 
 /// Parent-facing explanation for a failed connect. Never includes raw error
 /// text. [ConnectFailure.bluetoothOff] / [ConnectFailure.needsPermission] are
@@ -593,9 +677,9 @@ String connectFailureMessage(ConnectFailure kind, {required bool isIOS}) {
     case ConnectFailure.notSmarty:
       return "That doesn't look like a Smarty. Please try again.";
     case ConnectFailure.bluetoothOff:
-      return 'Turn on Bluetooth on your phone to reach Smarty';
+      return bluetoothOffLine;
     case ConnectFailure.needsPermission:
-      return 'Allow Bluetooth so the app can talk to Smarty';
+      return bluetoothPermissionLine;
     case ConnectFailure.notYourAccount:
       return notConfirmedMessage;
     case ConnectFailure.unknown:

@@ -31,7 +31,33 @@ class BleService {
     }
   }
 
-  // Attempt to open Bluetooth settings directly
+  static Future<void>? _configured;
+
+  /// Sets FlutterBluePlus's options once per launch; never throws. main()
+  /// awaits it before runApp, because the options must be set before any
+  /// other FlutterBluePlus call: on iOS the plugin creates its
+  /// CBCentralManager on the first call and reads them only then.
+  ///
+  /// `showPowerAlert`: when Bluetooth is off as the manager is created, iOS
+  /// shows its own "Turn On Bluetooth to Allow …" alert, whose Settings button
+  /// opens Settings → Bluetooth. That alert is the only sanctioned way there —
+  /// an app may only open its own page in Settings, which is all our "Open
+  /// Settings" buttons can do. It is the plugin's default today; set here so
+  /// it can't quietly change. No effect on Android.
+  static Future<void> configureBeforeFirstUse() =>
+      _configured ??= _setOptions();
+
+  static Future<void> _setOptions() async {
+    try {
+      await FlutterBluePlus.setOptions(showPowerAlert: true);
+    } catch (e) {
+      debugPrint("⚠️ BleService: couldn't set Bluetooth options: $e");
+    }
+  }
+
+  // Android: the Bluetooth settings page. iOS allows no link to Settings →
+  // Bluetooth, so this opens the app's own page in Settings — the copy around
+  // every such button says so (setup_steps.dart).
   static Future<void> _openBluetoothSettings() async {
     try {
       await AppSettings.openAppSettings(type: AppSettingsType.bluetooth);

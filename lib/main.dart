@@ -13,11 +13,14 @@ import 'settings_tab.dart';
 import 'providers/user_context_provider.dart';
 import 'utils/theme_provider.dart';
 import 'services/ble_manager.dart';
+import 'services/ble_service.dart';
 import 'screens/auth/login_page.dart';
 
 void main() async {
   // Ensure Flutter is initialized
   WidgetsFlutterBinding.ensureInitialized();
+  // Before anything else touches Bluetooth (iOS reads the options once).
+  await BleService.configureBeforeFirstUse();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   await _connectBackend();
   runApp(

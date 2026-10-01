@@ -3440,7 +3440,9 @@ class BleManager {
 
   /// Explicit, user-initiated "turn Bluetooth on" (for a button — never called
   /// automatically). Android shows the system dialog; iOS has no API for it,
-  /// so this opens Settings instead. The adapter listener takes it from there.
+  /// so this opens the app's own page in Settings instead (iOS allows no link
+  /// to Settings → Bluetooth; the line under the button says where it lands).
+  /// The adapter listener takes it from there.
   Future<void> requestBluetoothOn() async {
     if (Platform.isAndroid) {
       try {

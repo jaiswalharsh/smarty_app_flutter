@@ -254,9 +254,11 @@ void main() {
         status: pairingBrokenHeading,
         inside: [...pairingBrokenStepList(isIOS: false), 'Try again'],
       ),
+      // Tests run as Android: Platform.isIOS is false here (the iOS copy is
+      // covered in setup_steps_test.dart).
       ToyPhase.bluetoothOff: (
         status: 'Bluetooth is off on this phone',
-        inside: ['Turn on Bluetooth on your phone to reach Smarty', 'Turn on'],
+        inside: ['Turn on Bluetooth on your phone to reach Smarty.', 'Turn on'],
       ),
       ToyPhase.needsPermission: (
         status: 'Bluetooth permission needed',
