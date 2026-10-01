@@ -27,7 +27,12 @@ void main() async {
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
-        ChangeNotifierProvider(create: (_) => UserContextProvider()..init()),
+        // Not lazy: it follows the toy from the start — keeps the account's
+        // copy of the child's profile and pushes unsent edits on reconnect.
+        ChangeNotifierProvider(
+          create: (_) => UserContextProvider()..init(),
+          lazy: false,
+        ),
       ],
       child: const MyApp(),
     ),

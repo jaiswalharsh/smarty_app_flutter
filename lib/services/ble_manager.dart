@@ -464,6 +464,26 @@ class ToyStatus {
       'ToyStatus(wifi: $wifi, battery: $battery, registered: $registered)';
 }
 
+/// What reading the toy's own id (ab06) gave — see [BleManager.readToyId].
+@immutable
+class ToyIdRead {
+  /// The toy's id ([id]).
+  const ToyIdRead.ready(String this.id) : stillStarting = false;
+
+  /// No id. [stillStarting]: the toy answered, but its id was still empty
+  /// every time — it is still starting up (tap Try again). Otherwise no read
+  /// was answered at all (the link is gone, or the toy has no id to read).
+  const ToyIdRead.none({required this.stillStarting}) : id = null;
+
+  final String? id;
+  final bool stillStarting;
+
+  @override
+  String toString() => id != null
+      ? 'ToyIdRead($id)'
+      : 'ToyIdRead(none${stillStarting ? ', still starting' : ''})';
+}
+
 // A singleton class to manage BLE connections and data
 class BleManager {
   // Legacy device-global persistence keys (pre per-user scoping). Kept only for
@@ -873,6 +893,26 @@ class BleManager {
   /// [markRegistered]).
   ValueListenable<bool?> get registeredListenable => _registered;
 
+  /// Whether the connected toy is this account's own from before this
+  /// connection — see [isAccountToyConfirmed]. Fires when the account check
+  /// answers and when the link goes. The child's profile on such a toy is the
+  /// account's, so the phone keeps a copy of it (UserContextProvider): the
+  /// copy that is sent back to the toy after a reset.
+  ValueListenable<bool> get accountToyConfirmed => _accountToyConfirmed;
+  final ValueNotifier<bool> _accountToyConfirmed = ValueNotifier(false);
+
+  /// [accountToyConfirmed] from its inputs (pure, for tests): the toy counts
+  /// as linked ([registered]) and the account's records list it
+  /// ([accountHasToy], the account check on this connection). Never for a
+  /// toy this app linked on this connection ([linkedThisConnection]): it was
+  /// new, reset or erased, so what it holds isn't the account's profile.
+  static bool isAccountToyConfirmed({
+    required bool? registered,
+    required bool linkedThisConnection,
+    required bool? accountHasToy,
+  }) =>
+      registered == true && !linkedThisConnection && accountHasToy == true;
+
   /// Same as [registered]; kept for existing callers.
   bool? get deviceRegistered => _registered.value;
 
@@ -925,11 +965,18 @@ class BleManager {
       _accountCheckFor != null && _accountCheckFor == _connectedDevice;
 
   void _updateRegistered() {
+    final bool? accountHasToy =
+        _accountCheckedThisConnection ? _accountHasToy : null;
     _registered.value = deriveRegistered(
       statusRegistered: _statusRegistered,
       localRegistered: _localRegistered,
       linkedThisConnection: _linkedThisConnection,
-      accountHasToy: _accountCheckedThisConnection ? _accountHasToy : null,
+      accountHasToy: accountHasToy,
+    );
+    _accountToyConfirmed.value = isAccountToyConfirmed(
+      registered: _registered.value,
+      linkedThisConnection: _linkedThisConnection,
+      accountHasToy: accountHasToy,
     );
     // The toy now counts as linked (status / local record): make sure it is
     // linked to THIS account. Single-flight, once per connection.
@@ -1054,8 +1101,8 @@ class BleManager {
   Future<void> _loadLocalRegistered(BluetoothDevice device) async {
     if (_localRegistered != null) return;
     String? id = _toyDeviceIdByRemote[device.remoteId.str];
-    // readDeviceId retries internally too; ~2 s worst case in total.
-    for (int attempt = 0; attempt < 3 && !_idReadable(id); attempt++) {
+    // readDeviceId re-reads while the id is still empty (~3 s at most).
+    if (!_idReadable(id)) {
       id = await readDeviceId();
       if (_connectedDevice != device || _statusRegistered != null) return;
     }
@@ -1647,6 +1694,7 @@ class BleManager {
     _linkedOnConnection = null;
     _clearAccountCheck();
     _registered.value = null;
+    _accountToyConfirmed.value = false;
     _connectedDevice = null;
   }
 
@@ -2007,41 +2055,68 @@ class BleManager {
     }
   }
 
-  // Read device ID from ESP32 (MAC-derived hex string)
-  Future<String?> readDeviceId() async {
-    if (_deviceInfoCharacteristic == null) {
-      debugPrint("❌ BleManager: Device info characteristic (ab06) not found");
-      return null;
-    }
+  /// How the toy's own id (ab06) is read: an empty answer (or the "{}"
+  /// placeholder) is read again after each of these waits — 5 reads over
+  /// ~3 s — before giving up. Right after the toy starts its id is still
+  /// empty for a while, and ab06 uses ESP_GATT_AUTO_RSP: the first read once
+  /// the id is set can still return the old (empty) value.
+  static const List<Duration> toyIdReadWaits = [
+    Duration.zero,
+    Duration(milliseconds: 400),
+    Duration(milliseconds: 600),
+    Duration(milliseconds: 800),
+    Duration(milliseconds: 1200),
+  ];
 
-    // ab06 uses ESP_GATT_AUTO_RSP: the first read after a fresh connection often
-    // returns the "{}" placeholder, with the real MAC-derived id arriving on a
-    // later read (the same quirk the status read already retries around). Retry
-    // a few times, treating empty or "{}" as "not ready yet".
-    const retryDelaysMs = [0, 300, 500];
-    for (int attempt = 0; attempt < retryDelaysMs.length; attempt++) {
-      if (retryDelaysMs[attempt] > 0) {
-        await Future.delayed(Duration(milliseconds: retryDelaysMs[attempt]));
-      }
+  /// Read the toy's id with [read] (one read of ab06: its text, or a throw),
+  /// once after each of [waits] ([toyIdReadWaits]), until one gives a real
+  /// id. [wait] stands in for the waits in tests. Toy-free, for tests.
+  static Future<ToyIdRead> readToyIdWithRetries(
+    Future<String> Function() read, {
+    List<Duration> waits = toyIdReadWaits,
+    Future<void> Function(Duration) wait = Future<void>.delayed,
+  }) async {
+    bool answered = false;
+    for (int attempt = 0; attempt < waits.length; attempt++) {
+      if (waits[attempt] > Duration.zero) await wait(waits[attempt]);
       try {
-        List<int> data = await _deviceInfoCharacteristic!.read();
-        if (data.isNotEmpty) {
-          String deviceId = utf8.decode(data, allowMalformed: true);
-          if (deviceId != '{}' && deviceId.trim().isNotEmpty) {
-            debugPrint("BleManager: Read device ID: $deviceId");
-            final remote = _connectedDevice?.remoteId.str;
-            if (remote != null) _toyDeviceIdByRemote[remote] = deviceId;
-            return deviceId;
-          }
-          debugPrint("⚠️ BleManager: device ID not ready (got '$deviceId'), retrying...");
-        }
+        final String value = await read();
+        answered = true;
+        if (_idReadable(value)) return ToyIdRead.ready(value);
+        debugPrint("⚠️ BleManager: toy id not ready yet (got '$value')");
       } catch (e) {
-        debugPrint("❌ BleManager: Error reading device ID (attempt ${attempt + 1}): $e");
+        debugPrint("❌ BleManager: reading the toy id failed "
+            "(attempt ${attempt + 1}): $e");
       }
     }
-    debugPrint("❌ BleManager: device ID unavailable after retries");
-    return null;
+    return ToyIdRead.none(stillStarting: answered);
   }
+
+  /// Read the connected toy's own id (ab06, MAC-derived) — re-read while it
+  /// is still empty ([toyIdReadWaits]). The answer says whether the toy is
+  /// still starting up when there is no id.
+  Future<ToyIdRead> readToyId() async {
+    final BluetoothCharacteristic? c = _deviceInfoCharacteristic;
+    if (c == null) {
+      debugPrint("❌ BleManager: Device info characteristic (ab06) not found");
+      return const ToyIdRead.none(stillStarting: false);
+    }
+    final String? remote = _connectedDevice?.remoteId.str;
+    final ToyIdRead read = await readToyIdWithRetries(
+        () async => utf8.decode(await c.read(), allowMalformed: true));
+    final String? id = read.id;
+    if (id != null) {
+      debugPrint("BleManager: Read device ID: $id");
+      if (remote != null) _toyDeviceIdByRemote[remote] = id;
+    } else {
+      debugPrint("❌ BleManager: device ID unavailable after retries "
+          "(${read.stillStarting ? 'still starting' : 'no answer'})");
+    }
+    return read;
+  }
+
+  /// [readToyId]'s id, or null.
+  Future<String?> readDeviceId() async => (await readToyId()).id;
 
   // Write device secret to ESP32 for Firebase registration
   Future<bool> writeDeviceSecret(String secret) async {

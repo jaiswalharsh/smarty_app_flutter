@@ -29,18 +29,30 @@ enum ContextSaveResult {
   failed,
 }
 
+/// The child's profile ("About your child") for the signed-in account.
+/// Smarty's own copy is the one that counts; this phone keeps the account's
+/// copy — read whenever the account's own toy connects (see
+/// [shouldSyncWithAccountToy]), or when the profile page reads or saves it —
+/// and sends it back to a toy that comes back empty after a reset
+/// ([resendAfterLink]). Created with the app (not lazily), so it follows the
+/// toy from the start.
 class UserContextProvider with ChangeNotifier {
-  /// [readFromToy], [writeToToy] and [isToyConnected] replace the Bluetooth
-  /// calls in tests; the app uses the defaults ([BleManager]).
+  /// [readFromToy], [writeToToy], [isToyConnected], [toyPhase] and
+  /// [accountToyConfirmed] replace the Bluetooth side in tests; the app uses
+  /// the defaults ([BleManager]).
   UserContextProvider({
     @visibleForTesting Future<String?> Function()? readFromToy,
     @visibleForTesting Future<bool> Function(String context)? writeToToy,
     @visibleForTesting bool Function()? isToyConnected,
+    @visibleForTesting ValueListenable<ToyPhase>? toyPhase,
+    @visibleForTesting ValueListenable<bool>? accountToyConfirmed,
     @visibleForTesting this.toyReadTimeout = defaultToyReadTimeout,
   })  : _readFromToy = readFromToy ?? (() => BleManager().readUserContext()),
         _writeToToy =
             writeToToy ?? ((context) => BleManager().writeUserContext(context)),
-        _isToyConnected = isToyConnected ?? (() => BleManager().isConnected);
+        _isToyConnected = isToyConnected ?? (() => BleManager().isConnected),
+        _toyPhaseOverride = toyPhase,
+        _accountToyOverride = accountToyConfirmed;
 
   /// How long to wait for Smarty's copy before showing the phone's own.
   static const Duration defaultToyReadTimeout = Duration(seconds: 5);
@@ -49,6 +61,12 @@ class UserContextProvider with ChangeNotifier {
   final Future<String?> Function() _readFromToy;
   final Future<bool> Function(String context) _writeToToy;
   final bool Function() _isToyConnected;
+  final ValueListenable<ToyPhase>? _toyPhaseOverride;
+  final ValueListenable<bool>? _accountToyOverride;
+  ValueListenable<ToyPhase> get _toyPhase =>
+      _toyPhaseOverride ?? BleManager().phase;
+  ValueListenable<bool> get _accountToy =>
+      _accountToyOverride ?? BleManager().accountToyConfirmed;
 
   // Legacy device-global key (pre per-user scoping). Kept only for one-time
   // migration into the uid-scoped key — one parent's child profile must not
@@ -72,6 +90,8 @@ class UserContextProvider with ChangeNotifier {
   bool _pendingSync = false;
 
   String? _uid;
+  // Loading this account's copy from the phone (see _onAccountChanged).
+  Future<void>? _accountLoad;
   StreamSubscription<User?>? _authSub;
   // Watches BleManager.phase so a pending (offline) edit is pushed the moment
   // Smarty reaches ToyPhase.connected (characteristics cached, ready to write).
@@ -116,23 +136,64 @@ class UserContextProvider with ChangeNotifier {
     _authSub ??= FirebaseAuth.instance
         .authStateChanges()
         .listen((user) => _onAccountChanged(user?.uid));
-    if (!_phaseListening) {
-      _phaseListening = true;
-      _lastPhase = BleManager().phase.value;
-      BleManager().phase.addListener(_onPhaseChanged);
-    }
+    _watchToy();
+  }
+
+  /// Follow the toy as [init] does — for tests, which have no sign-in
+  /// service.
+  @visibleForTesting
+  void debugWatchToy() => _watchToy();
+
+  void _watchToy() {
+    if (_phaseListening) return;
+    _phaseListening = true;
+    _lastPhase = _toyPhase.value;
+    _toyPhase.addListener(_onPhaseChanged);
+    _accountToy.addListener(_onAccountToyChanged);
+    _onAccountToyChanged(); // already connected to it
   }
 
   // Push a pending (offline) edit as soon as Smarty comes back, whether or not
   // the profile page is open. `connected` is only reached once initialize()
   // has cached the characteristics, so the write can go out right away.
   void _onPhaseChanged() {
-    final phase = BleManager().phase.value;
+    final phase = _toyPhase.value;
     final reconnected =
         phase == ToyPhase.connected && _lastPhase != ToyPhase.connected;
     _lastPhase = phase;
     if (!reconnected || _uid == null || !_pendingSync || isBusy) return;
     unawaited(refreshFromDevice());
+  }
+
+  /// Whether to sync with Smarty now that the connected toy is confirmed as
+  /// the account's own ([confirmed] — BleManager.accountToyConfirmed: linked
+  /// to this account before this connection): read its profile and keep it
+  /// as the account's copy on this phone — the copy [resendAfterLink] sends
+  /// back after a reset — or push an edit that never reached Smarty. Not
+  /// while signed out, or while another read / save is running. Pure.
+  static bool shouldSyncWithAccountToy({
+    required bool confirmed,
+    required bool signedIn,
+    required bool busy,
+  }) =>
+      confirmed && signedIn && !busy;
+
+  void _onAccountToyChanged() {
+    if (_accountToy.value) unawaited(_syncWithAccountToy());
+  }
+
+  Future<void> _syncWithAccountToy() async {
+    await _accountLoad; // this account's own copy (and unsent flag) first
+    if (!shouldSyncWithAccountToy(
+      confirmed: _accountToy.value,
+      signedIn: _uid != null,
+      busy: isBusy,
+    )) {
+      return;
+    }
+    debugPrint("UserContextProvider: the account's Smarty is here — syncing "
+        'the profile');
+    await refreshFromDevice();
   }
 
   /// Switch to the account [uid] (null = signed out) as a sign-in would — for
@@ -143,8 +204,12 @@ class UserContextProvider with ChangeNotifier {
   // Reload (or clear) in-memory state to match the signed-in account so a
   // second parent on the same phone never inherits the first parent's context
   // — not even while the new account's copy is still loading.
-  Future<void> _onAccountChanged(String? newUid) async {
-    if (newUid == _uid) return;
+  Future<void> _onAccountChanged(String? newUid) {
+    if (newUid == _uid) return _accountLoad ?? Future.value();
+    return _accountLoad = _switchAccount(newUid);
+  }
+
+  Future<void> _switchAccount(String? newUid) async {
     _uid = newUid;
     _context = '';
     _errorMessage = null;
@@ -277,6 +342,7 @@ class UserContextProvider with ChangeNotifier {
   /// connects. Nothing happens without a profile on this phone (e.g. a new
   /// phone: the profile page then reads Smarty's copy).
   Future<void> resendAfterLink() async {
+    await _accountLoad; // the account's copy must be in before deciding
     final String? uid = _uid;
     if (!shouldResendAfterLink(
       signedIn: uid != null,
@@ -401,7 +467,8 @@ class UserContextProvider with ChangeNotifier {
     // The root provider isn't disposed in practice; this is for correctness.
     _authSub?.cancel();
     if (_phaseListening) {
-      BleManager().phase.removeListener(_onPhaseChanged);
+      _toyPhase.removeListener(_onPhaseChanged);
+      _accountToy.removeListener(_onAccountToyChanged);
       _phaseListening = false;
     }
     super.dispose();

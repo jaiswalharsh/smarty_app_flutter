@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:smarty_app/home_tab.dart'
     show reconnectOfferLine, reconnectOfferLineFor;
+import 'package:smarty_app/services/ble_manager.dart' show ToyIdRead;
 import 'package:smarty_app/services/device_registration_service.dart';
 import 'package:smarty_app/services/known_toys_service.dart';
 
@@ -365,6 +366,35 @@ void main() {
           reason: '$name',
         );
       }
+    });
+  });
+
+  group("linking: the toy's id", () {
+    test('an id → go on', () {
+      expect(
+        DeviceRegistrationService.failureForIdRead(
+            const ToyIdRead.ready('1cc3abc9b11c')),
+        isNull,
+      );
+    });
+
+    test('the toy answered but had no id yet → "still starting up", and '
+        'Try again is offered', () {
+      final f = DeviceRegistrationService.failureForIdRead(
+          const ToyIdRead.none(stillStarting: true));
+      expect(f, RegistrationFailure.toyStarting);
+      expect(f!.message, 'Smarty is still starting up — tap Try again.');
+      expect(toyStartingHeading, "Smarty isn't ready yet");
+      expect(f.message, toyStartingMessage);
+      expect(f.canRetry, isTrue);
+    });
+
+    test('no answer at all → lost touch', () {
+      expect(
+        DeviceRegistrationService.failureForIdRead(
+            const ToyIdRead.none(stillStarting: false)),
+        RegistrationFailure.deviceUnreachable,
+      );
     });
   });
 

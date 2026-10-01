@@ -74,10 +74,14 @@ const KnownToy secondToy =
     KnownToy(deviceId: '0a0b0c0d0e0f', bleName: 'Smarty-0E11');
 
 /// A toy seen while looking: its name, BLE id, what it says about pairing
-/// (null = old firmware, no advert data) and whether it says it is linked
-/// to an account ([registered], flags bit2).
+/// (null = old firmware, no advert data), whether it says it is linked
+/// to an account ([registered], flags bit2), and when that advert came ([at]
+/// — a new time is a new advert).
 ScanResult toySeen(String name,
-        {required String id, bool? pairing, bool registered = false}) =>
+        {required String id,
+        bool? pairing,
+        bool registered = false,
+        DateTime? at}) =>
     ScanResult(
       device: BluetoothDevice.fromId(id),
       advertisementData: AdvertisementData(
@@ -97,7 +101,7 @@ ScanResult toySeen(String name,
         serviceUuids: [Guid('abcd')],
       ),
       rssi: -50,
-      timeStamp: DateTime(2026, 9, 30),
+      timeStamp: at ?? DateTime(2026, 9, 30),
     );
 
 void main() {
@@ -112,6 +116,7 @@ void main() {
       bool newToy = false,
       required FakeKnownToys known,
       ConnectException? failWith,
+      DateTime Function()? clock,
     }) async {
       connects = [];
       await tester.pumpWidget(MaterialApp(
@@ -119,6 +124,7 @@ void main() {
           reconnectTo: reconnectTo,
           newToy: newToy,
           knownToys: known,
+          clock: clock,
           connectToy: (device) async {
             connects.add(device);
             throw failWith ??
@@ -473,6 +479,103 @@ void main() {
       await tester.pump();
       expect(connects.map((d) => d.remoteId.str), ['AA:BB:CC:DD:EE:01']);
       await unmount(tester);
+    });
+
+    // After a reset the toy restarts under a new Bluetooth address: its old
+    // tile is dead. A tile whose toy has gone quiet is looked for again
+    // before connecting.
+    group('a tile whose toy went quiet', () {
+      final DateTime t0 = DateTime(2026, 10, 1, 20, 24);
+      late DateTime now;
+
+      Future<SmartyConnectionPageState> twoToys(WidgetTester tester) async {
+        now = t0;
+        final page = await pumpPage(tester,
+            known: FakeKnownToys([]), clock: () => now);
+        // Two toys waiting to pair: nothing is connected by itself.
+        await see(tester, page, [
+          toySeen('Smarty-B11E', id: 'AA:BB:CC:DD:EE:01', pairing: true,
+              at: t0),
+          toySeen('Smarty-0E11', id: 'AA:BB:CC:DD:EE:02', pairing: true,
+              at: t0),
+        ]);
+        expect(find.text('Smarty toys nearby'), findsOneWidget);
+        return page;
+      }
+
+      testWidgets('heard from just now: a tap connects right away',
+          (tester) async {
+        await twoToys(tester);
+        now = t0.add(const Duration(seconds: 1));
+        await tester.tap(find.text('B11E'));
+        await tester.pump();
+        expect(connects.map((d) => d.remoteId.str), ['AA:BB:CC:DD:EE:01']);
+        await unmount(tester);
+      });
+
+      testWidgets('quiet: looked for first, connected once heard again',
+          (tester) async {
+        final page = await twoToys(tester);
+        // B11E goes quiet; 0E11 keeps advertising.
+        now = t0.add(const Duration(seconds: 3));
+        await see(tester, page, [
+          toySeen('Smarty-B11E', id: 'AA:BB:CC:DD:EE:01', pairing: true,
+              at: t0),
+          toySeen('Smarty-0E11', id: 'AA:BB:CC:DD:EE:02', pairing: true,
+              at: now),
+        ]);
+        await tester.tap(find.text('B11E'));
+        await tester.pump();
+        expect(connects, isEmpty);
+        expect(find.text('Connecting to Smarty…'), findsOneWidget);
+
+        // Heard from again: connect.
+        now = now.add(const Duration(seconds: 1));
+        await see(tester, page, [
+          toySeen('Smarty-B11E', id: 'AA:BB:CC:DD:EE:01', pairing: true,
+              at: now),
+          toySeen('Smarty-0E11', id: 'AA:BB:CC:DD:EE:02', pairing: true,
+              at: now),
+        ]);
+        expect(connects.map((d) => d.remoteId.str), ['AA:BB:CC:DD:EE:01']);
+        await unmount(tester);
+      });
+
+      testWidgets(
+          'gone (restarted under a new address): its tile is dropped, never '
+          'connected; it only comes back when heard from again',
+          (tester) async {
+        final page = await twoToys(tester);
+        now = t0.add(const Duration(seconds: 3));
+        await tester.tap(find.text('B11E'));
+        await tester.pump();
+        expect(connects, isEmpty);
+
+        // Nothing from it within [staleTapWait] — the scan still lists it
+        // (with its old advert) for a moment.
+        now = now.add(staleTapWait);
+        await tester.pump(staleTapWait);
+        await see(tester, page, [
+          toySeen('Smarty-B11E', id: 'AA:BB:CC:DD:EE:01', pairing: true,
+              at: t0),
+          toySeen('Smarty-0E11', id: 'AA:BB:CC:DD:EE:02', pairing: true,
+              at: now),
+        ]);
+        expect(connects, isEmpty);
+        expect(find.text('B11E'), findsNothing);
+        expect(find.text('0E11'), findsOneWidget);
+        expect(find.text('Connecting to Smarty…'), findsNothing);
+
+        // Heard from again: listed again.
+        await see(tester, page, [
+          toySeen('Smarty-B11E', id: 'AA:BB:CC:DD:EE:01', pairing: true,
+              at: now),
+          toySeen('Smarty-0E11', id: 'AA:BB:CC:DD:EE:02', pairing: true,
+              at: now),
+        ]);
+        expect(find.text('B11E'), findsOneWidget);
+        await unmount(tester);
+      });
     });
   });
 

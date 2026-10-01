@@ -372,4 +372,150 @@ void main() {
       expect(written, isEmpty);
     });
   });
+
+  // The phone keeps the account's copy of the profile whenever the account's
+  // own toy connects — not only when "About your child" is opened — so the
+  // copy is there to send back after a reset.
+  group("the account's copy of the profile", () {
+    late String toyProfile;
+    late ValueNotifier<ToyPhase> phase;
+    late ValueNotifier<bool> accountToy;
+
+    UserContextProvider watching() {
+      written = [];
+      reads = 0;
+      phase = ValueNotifier(ToyPhase.notNearby);
+      accountToy = ValueNotifier(false);
+      addTearDown(phase.dispose);
+      addTearDown(accountToy.dispose);
+      final provider = UserContextProvider(
+        readFromToy: () async {
+          reads++;
+          return toyProfile;
+        },
+        writeToToy: (text) async {
+          written.add(text);
+          toyProfile = text;
+          return true;
+        },
+        isToyConnected: () => phase.value == ToyPhase.connected,
+        toyPhase: phase,
+        accountToyConfirmed: accountToy,
+      );
+      return provider;
+    }
+
+    // The account's own toy connects: BleManager reaches `connected`, then
+    // its account check confirms the toy is on this account.
+    Future<void> accountToyConnects() async {
+      phase.value = ToyPhase.connected;
+      accountToy.value = true;
+      await pumpEventQueue();
+    }
+
+    test('the decision: only for the account\'s own toy, signed in, and '
+        'nothing else running', () {
+      bool sync({bool confirmed = true, bool signedIn = true,
+              bool busy = false}) =>
+          UserContextProvider.shouldSyncWithAccountToy(
+              confirmed: confirmed, signedIn: signedIn, busy: busy);
+      expect(sync(), isTrue);
+      expect(sync(confirmed: false), isFalse);
+      expect(sync(signedIn: false), isFalse);
+      expect(sync(busy: true), isFalse);
+    });
+
+    test(
+        "a phone that never opened About your child: the profile is kept when "
+        'the toy connects, and sent back after a reset and a new link',
+        () async {
+      // 2026-10-01: the toy held 407 bytes; this phone had no copy for the
+      // account (it had never opened About your child), so after the toy
+      // erased itself resendAfterLink had nothing to send.
+      SharedPreferences.setMockInitialValues({});
+      toyProfile = 'Ola is 5 and loves horses.';
+      final provider = watching();
+      await provider.debugSetAccount('parent-a');
+      provider.debugWatchToy();
+
+      await accountToyConnects();
+      expect(reads, 1);
+      expect(written, isEmpty);
+      expect(provider.context, 'Ola is 5 and loves horses.');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('user_context_parent-a'),
+          'Ola is 5 and loves horses.');
+
+      // Removed from the account: the toy erases itself and restarts empty.
+      accountToy.value = false;
+      phase.value = ToyPhase.notNearby;
+      toyProfile = '';
+      // Set up again: linked on this connection — never read (its empty
+      // profile isn't the account's) …
+      phase.value = ToyPhase.connected;
+      await pumpEventQueue();
+      expect(reads, 1);
+      // … and the link step sends the account's copy back.
+      await provider.resendAfterLink();
+      expect(written, ['Ola is 5 and loves horses.']);
+      expect(toyProfile, 'Ola is 5 and loves horses.');
+      expect(provider.hasPendingSync, isFalse);
+    });
+
+    test('an edit that never reached Smarty is sent, not replaced by the '
+        "toy's older copy", () async {
+      SharedPreferences.setMockInitialValues({
+        'user_context_parent-a': 'New notes',
+        'user_context_pending_sync_parent-a': true,
+      });
+      toyProfile = 'Old notes';
+      final provider = watching();
+      await provider.debugSetAccount('parent-a');
+      provider.debugWatchToy();
+
+      await accountToyConnects();
+      expect(written, ['New notes']);
+      expect(reads, 0);
+      expect(provider.context, 'New notes');
+      expect(provider.hasPendingSync, isFalse);
+    });
+
+    test('already connected to it when the app starts following the toy',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      toyProfile = 'Loves dinosaurs';
+      final provider = watching();
+      phase.value = ToyPhase.connected;
+      accountToy.value = true;
+      await provider.debugSetAccount('parent-a');
+      provider.debugWatchToy();
+      await pumpEventQueue();
+      expect(reads, 1);
+      expect(provider.context, 'Loves dinosaurs');
+    });
+
+    test('signed out: nothing read, nothing kept', () async {
+      SharedPreferences.setMockInitialValues({});
+      toyProfile = 'Loves dinosaurs';
+      final provider = watching();
+      provider.debugWatchToy();
+      await accountToyConnects();
+      expect(reads, 0);
+      expect(provider.context, isEmpty);
+    });
+
+    test("resendAfterLink waits for the account's copy to load first",
+        () async {
+      SharedPreferences.setMockInitialValues({
+        'user_context_parent-a': 'Loves dinosaurs',
+      });
+      toyProfile = '';
+      final provider = watching();
+      phase.value = ToyPhase.connected;
+      // Not awaited: the link step can finish while the copy is loading.
+      unawaited(provider.debugSetAccount('parent-a'));
+      await provider.resendAfterLink();
+      expect(written, ['Loves dinosaurs']);
+    });
+  });
 }

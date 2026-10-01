@@ -198,6 +198,38 @@ int? autoSelectIndex(List<ListedToy> listed, {required SetupMode mode}) {
   }
 }
 
+// ---- Tiles that went quiet -------------------------------------------------------
+
+/// A toy that hasn't advertised for this long drops off the list (turned
+/// off, connected to another phone, or restarting — a toy comes back from a
+/// restart under a new Bluetooth address, so as a new tile).
+const Duration toyGoneAfter = Duration(seconds: 4);
+
+/// A tile whose toy was heard from within this long is connected right away
+/// when tapped (the toy advertises several times a second).
+const Duration tileFreshFor = Duration(seconds: 2);
+
+/// Tapping a tile whose toy has been quiet for longer than [tileFreshFor]:
+/// how long to look for it again before giving up on that tile.
+const Duration staleTapWait = Duration(seconds: 3);
+
+/// What tapping a toy's tile does. See [tileTapFor].
+enum TileTap {
+  /// Connect now.
+  connect,
+
+  /// Look for it again first, and connect once it is heard from (within
+  /// [staleTapWait]); otherwise the tile is dropped.
+  checkFirst,
+}
+
+/// [TileTap] for a tile whose toy was last heard from [sinceHeard] ago (null
+/// = never heard in this look). Pure.
+TileTap tileTapFor(Duration? sinceHeard) =>
+    sinceHeard != null && sinceHeard <= tileFreshFor
+        ? TileTap.connect
+        : TileTap.checkFirst;
+
 // ---- Hints --------------------------------------------------------------------
 
 /// Hint (text only — never a button) shown while the look is running and
@@ -403,11 +435,18 @@ String pairPromptNote({required bool onlyYours}) => onlyYours
 // Owner's rule: Smarty joins its saved Wi-Fi by itself first. Only if that
 // doesn't work do we say Smarty is having trouble and offer a different
 // network. A toy with no Wi-Fi saved gets the "Last step" prompt; a toy we
-// couldn't hear from is never silently assumed to need setup.
+// couldn't hear from is never silently assumed to need setup. A toy that is
+// still starting its Wi-Fi ("Initializing") gets a short wait, then the
+// network list; and Try again never waits again — it goes to the list.
 
 /// How long the Wi-Fi step waits for the toy (its first status, or its saved
-/// Wi-Fi coming up) before giving an answer.
+/// Wi-Fi coming back) before giving an answer.
 const Duration wifiCheckWait = Duration(seconds: 20);
+
+/// How long the Wi-Fi step waits for a toy that says it is still starting
+/// its Wi-Fi ("Initializing": we don't know yet whether it has a network to
+/// join) before showing the network list ([WifiDecision.pickNetwork]).
+const Duration wifiStartingWait = Duration(seconds: 5);
 
 /// While checking, ask the toy for its status this often.
 const Duration wifiRecheckEvery = Duration(seconds: 3);
@@ -417,8 +456,8 @@ enum WifiDecision {
   /// On Wi-Fi — setup can finish.
   connected,
 
-  /// "Checking Smarty's Wi-Fi…" with a spinner: no status yet, or the toy is
-  /// still joining its saved Wi-Fi.
+  /// [wifiCheckingLabel] with a spinner: no status yet, or the toy is still
+  /// starting / joining its saved Wi-Fi.
   checking,
 
   /// No Wi-Fi saved on the toy: "Last step: connect Smarty to your home
@@ -436,6 +475,12 @@ enum WifiDecision {
   /// [wifiCheckWait] passed and the toy never said anything: [Check again]
   /// [Set up Wi-Fi] [Later].
   couldNotCheck,
+
+  /// Smarty isn't on Wi-Fi and the step stopped waiting: it was still
+  /// starting its Wi-Fi after [wifiStartingWait], or the parent tapped Try
+  /// again. The network list, with [wifiPickNetworkLine] on top (the setup
+  /// page opens it; back from it: the same line, [Connect Wi-Fi] [Later]).
+  pickNetwork,
 }
 
 /// Raw status values that mean "no answer yet" (the app's own placeholders).
@@ -448,20 +493,22 @@ bool _isNoStatus(String s) =>
 ///   has arrived since connecting.
 /// - [advertWifiUp]: the Wi-Fi bit the toy advertised just before we
 ///   connected (null = not reported).
-/// - [waited]: time since this check (or its "Try again") started.
-/// - [retrying]: the parent tapped Try again — a failure the toy already
-///   reported doesn't end the wait early, so its own retries get
-///   [wifiCheckWait] to work.
+/// - [waited]: time since this check started.
+/// - [retrying]: the parent tapped Try again after a failure — no waiting
+///   again: on Wi-Fi now, or the network list.
 ///
-/// | status                      | before [wifiCheckWait]      | after        |
-/// |-----------------------------|-----------------------------|--------------|
-/// | a network name              | connected                   | connected    |
-/// | none, advert says on Wi-Fi  | connected                   | connected    |
-/// | none                        | checking                    | couldNotCheck|
-/// | Initializing / Reconnecting | checking                    | unreachable  |
-/// | No credentials              | needsSetup                  | needsSetup   |
-/// | Auth Failed                 | authFailed (retry: checking)| authFailed   |
-/// | Connection Failed / *Failed | unreachable (retry: checking)| unreachable |
+/// | status                      | before the wait | after the wait | retrying    |
+/// |-----------------------------|-----------------|----------------|-------------|
+/// | a network name              | connected       | connected      | connected   |
+/// | none, advert says on Wi-Fi  | connected       | connected      | connected   |
+/// | none                        | checking        | couldNotCheck  | pickNetwork |
+/// | Initializing ([wifiStartingWait]) | checking  | pickNetwork    | pickNetwork |
+/// | Reconnecting                | checking        | unreachable    | pickNetwork |
+/// | No credentials              | needsSetup      | needsSetup     | pickNetwork |
+/// | Auth Failed                 | authFailed      | authFailed     | pickNetwork |
+/// | Connection Failed / *Failed | unreachable     | unreachable    | pickNetwork |
+///
+/// The wait is [wifiCheckWait] except where noted.
 WifiDecision decideWifiStep({
   String? status,
   bool? advertWifiUp,
@@ -469,35 +516,47 @@ WifiDecision decideWifiStep({
   bool retrying = false,
 }) {
   final String s = (status ?? '').trim();
-  final bool timedOut = waited >= wifiCheckWait;
 
   if (_isNoStatus(s)) {
     // The toy said it was online just before we connected; trust that until
     // a status says otherwise.
     if (advertWifiUp == true) return WifiDecision.connected;
-    return timedOut ? WifiDecision.couldNotCheck : WifiDecision.checking;
+    if (retrying) return WifiDecision.pickNetwork;
+    return waited >= wifiCheckWait
+        ? WifiDecision.couldNotCheck
+        : WifiDecision.checking;
   }
+  final bool failed = s == 'Connection Failed' || s.contains('Failed');
+  final bool known = failed ||
+      const {'Initializing', 'Reconnecting', 'No credentials'}.contains(s);
+  // Anything else is the name of the network it is on.
+  if (!known) return WifiDecision.connected;
+  if (retrying) return WifiDecision.pickNetwork;
   switch (s) {
     case 'Initializing':
+      return waited >= wifiStartingWait
+          ? WifiDecision.pickNetwork
+          : WifiDecision.checking;
     case 'Reconnecting':
-      return timedOut ? WifiDecision.unreachable : WifiDecision.checking;
+      return waited >= wifiCheckWait
+          ? WifiDecision.unreachable
+          : WifiDecision.checking;
     case 'No credentials':
       return WifiDecision.needsSetup;
     case 'Auth Failed':
-      return retrying && !timedOut
-          ? WifiDecision.checking
-          : WifiDecision.authFailed;
+      return WifiDecision.authFailed;
   }
-  if (s == 'Connection Failed' || s.contains('Failed')) {
-    return retrying && !timedOut
-        ? WifiDecision.checking
-        : WifiDecision.unreachable;
-  }
-  return WifiDecision.connected;
+  return WifiDecision.unreachable;
 }
 
-/// Label for the Wi-Fi row while [WifiDecision.checking].
-const String wifiCheckingLabel = "Checking Smarty's Wi-Fi…";
+/// Label for the Wi-Fi row while [WifiDecision.checking]: what the step is
+/// doing.
+const String wifiCheckingLabel = 'Checking whether Smarty is already on Wi-Fi…';
+
+/// [WifiDecision.pickNetwork]: the step stopped waiting. Shown over the
+/// network list, and on the setup page when the parent comes back from it.
+const String wifiPickNetworkLine =
+    "Smarty isn't on Wi-Fi yet. Pick your network.";
 
 /// The name to use for the toy's saved network in messages.
 String _wifiNameFor(String? ssid) {
@@ -523,6 +582,7 @@ String? wifiDecisionMessage(WifiDecision d, {String? ssid}) => switch (d) {
   WifiDecision.authFailed => wifiAuthFailedLine(ssid),
   WifiDecision.unreachable => wifiUnreachableLine(ssid),
   WifiDecision.couldNotCheck => "We couldn't check Smarty's Wi-Fi.",
+  WifiDecision.pickNetwork => wifiPickNetworkLine,
 };
 
 /// Last step of every "old connection" (pairingBroken) explanation. The toy

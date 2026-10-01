@@ -223,14 +223,39 @@ void main() {
     }
   });
 
+  group('tiles that went quiet', () {
+    test('timings: gone after 4 s; fresh for 2 s; a quiet tile is looked for '
+        'for 3 s', () {
+      expect(toyGoneAfter, const Duration(seconds: 4));
+      expect(tileFreshFor, const Duration(seconds: 2));
+      expect(staleTapWait, const Duration(seconds: 3));
+      // A quiet tile is checked before the scan itself drops it.
+      expect(tileFreshFor < toyGoneAfter, isTrue);
+    });
+
+    test('tileTapFor: heard from lately → connect; quiet (or never heard) → '
+        'look for it first', () {
+      expect(tileTapFor(Duration.zero), TileTap.connect);
+      expect(tileTapFor(const Duration(milliseconds: 300)), TileTap.connect);
+      expect(tileTapFor(tileFreshFor), TileTap.connect);
+      expect(tileTapFor(tileFreshFor + const Duration(milliseconds: 1)),
+          TileTap.checkFirst);
+      expect(tileTapFor(const Duration(seconds: 7)), TileTap.checkFirst);
+      expect(tileTapFor(null), TileTap.checkFirst);
+    });
+  });
+
   group('decideWifiStep', () {
-    const early = Duration(seconds: 5);
+    const early = Duration(seconds: 3);
+    const startingDone = Duration(seconds: 5);
     const justBefore = Duration(seconds: 19, milliseconds: 999);
     const atWait = Duration(seconds: 20);
     const late = Duration(seconds: 45);
 
-    test('the wait is 20 s, re-reading every 3 s', () {
+    test('the waits: 20 s, 5 s for a toy still starting its Wi-Fi; re-reading '
+        'every 3 s', () {
       expect(wifiCheckWait, const Duration(seconds: 20));
+      expect(wifiStartingWait, const Duration(seconds: 5));
       expect(wifiRecheckEvery, const Duration(seconds: 3));
     });
 
@@ -244,38 +269,43 @@ void main() {
       (null, true, Duration.zero, false, WifiDecision.connected),
       ('Unknown', true, early, false, WifiDecision.connected),
       ('NotConnected', true, late, false, WifiDecision.connected),
-      ('', true, early, false, WifiDecision.connected),
+      ('', true, early, true, WifiDecision.connected),
       // No status yet, nothing (or "not on Wi-Fi") advertised: keep checking
       // for 20 s, then say so — never assume it needs setup.
       (null, null, Duration.zero, false, WifiDecision.checking),
       ('Unknown', false, justBefore, false, WifiDecision.checking),
-      ('  ', null, early, true, WifiDecision.checking),
       (null, null, atWait, false, WifiDecision.couldNotCheck),
       ('Unknown', false, late, false, WifiDecision.couldNotCheck),
-      ('NotConnected', null, late, true, WifiDecision.couldNotCheck),
-      // Joining its saved Wi-Fi: checking; not up after 20 s = trouble.
-      ('Initializing', null, early, false, WifiDecision.checking),
+      // Still starting its Wi-Fi: we don't know yet — a short wait, then
+      // the network list (not the full 20 s).
+      ('Initializing', null, Duration.zero, false, WifiDecision.checking),
+      ('Initializing', false, early, false, WifiDecision.checking),
+      ('Initializing', null, startingDone, false, WifiDecision.pickNetwork),
+      ('Initializing', null, late, false, WifiDecision.pickNetwork),
+      // Joining its saved Wi-Fi again: the full wait, then trouble.
       ('Reconnecting', true, justBefore, false, WifiDecision.checking),
-      ('Initializing', null, atWait, false, WifiDecision.unreachable),
-      ('Reconnecting', false, late, true, WifiDecision.unreachable),
+      ('Reconnecting', null, atWait, false, WifiDecision.unreachable),
       // No Wi-Fi saved: straight to setup, even if the advert said otherwise.
       ('No credentials', null, Duration.zero, false, WifiDecision.needsSetup),
-      ('No credentials', true, early, true, WifiDecision.needsSetup),
+      ('No credentials', true, early, false, WifiDecision.needsSetup),
       ('No credentials', false, late, false, WifiDecision.needsSetup),
       // Wrong password on the saved Wi-Fi (status beats the advert).
       ('Auth Failed', null, Duration.zero, false, WifiDecision.authFailed),
-      ('Auth Failed', true, early, false, WifiDecision.authFailed),
-      ('Auth Failed', null, early, true, WifiDecision.checking),
-      ('Auth Failed', null, atWait, true, WifiDecision.authFailed),
-      // Saved Wi-Fi can't be reached.
+      ('Auth Failed', true, late, false, WifiDecision.authFailed),
+      // Saved Wi-Fi can't be reached; any other failure token counts too.
       ('Connection Failed', null, Duration.zero, false,
           WifiDecision.unreachable),
       ('Connection Failed', true, late, false, WifiDecision.unreachable),
-      ('Connection Failed', null, justBefore, true, WifiDecision.checking),
-      ('Connection Failed', null, atWait, true, WifiDecision.unreachable),
-      // Any other failure token counts as "can't reach".
       ('DHCP Failed', null, early, false, WifiDecision.unreachable),
-      ('DHCP Failed', null, early, true, WifiDecision.checking),
+      // Try again never waits again: on Wi-Fi now, or the network list.
+      (null, null, Duration.zero, true, WifiDecision.pickNetwork),
+      ('  ', false, early, true, WifiDecision.pickNetwork),
+      ('Initializing', null, Duration.zero, true, WifiDecision.pickNetwork),
+      ('Reconnecting', null, Duration.zero, true, WifiDecision.pickNetwork),
+      ('No credentials', null, Duration.zero, true, WifiDecision.pickNetwork),
+      ('Auth Failed', null, Duration.zero, true, WifiDecision.pickNetwork),
+      ('Connection Failed', null, early, true, WifiDecision.pickNetwork),
+      ('DHCP Failed', null, Duration.zero, true, WifiDecision.pickNetwork),
     ];
     for (final (status, advert, waited, retrying, expected) in rows) {
       test('"$status" advert=$advert waited=${waited.inMilliseconds}ms '
@@ -291,11 +321,30 @@ void main() {
         );
       });
     }
+
+    test('a retry never says "checking" — nothing to wait for again', () {
+      for (final status in [
+        null, 'Unknown', 'Initializing', 'Reconnecting', 'No credentials',
+        'Auth Failed', 'Connection Failed', 'HomeNet',
+      ]) {
+        for (final waited in [Duration.zero, early, late]) {
+          expect(
+            decideWifiStep(status: status, waited: waited, retrying: true),
+            isNot(WifiDecision.checking),
+            reason: '$status after ${waited.inSeconds} s',
+          );
+        }
+      }
+    });
   });
 
   group('Wi-Fi step copy', () {
     test('exact messages', () {
-      expect(wifiCheckingLabel, "Checking Smarty's Wi-Fi…");
+      expect(wifiCheckingLabel, 'Checking whether Smarty is already on Wi-Fi…');
+      expect(wifiDecisionMessage(WifiDecision.pickNetwork),
+          "Smarty isn't on Wi-Fi yet. Pick your network.");
+      expect(wifiPickNetworkLine,
+          "Smarty isn't on Wi-Fi yet. Pick your network.");
       expect(wifiDecisionMessage(WifiDecision.connected), isNull);
       expect(wifiDecisionMessage(WifiDecision.checking), isNull);
       expect(wifiDecisionMessage(WifiDecision.needsSetup),

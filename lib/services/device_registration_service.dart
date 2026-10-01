@@ -32,9 +32,19 @@ enum RegistrationFailure {
   /// the key on it).
   deviceUnreachable,
 
+  /// The toy answered, but its ID was still empty after re-reading it for a
+  /// few seconds ([BleManager.toyIdReadWaits]): it is still starting up.
+  toyStarting,
+
   /// Anything else that we didn't anticipate.
   unknown,
 }
+
+/// [RegistrationFailure.toyStarting]: Smarty was just switched on (or
+/// restarted) and isn't ready yet — the heading, and what to do.
+const String toyStartingHeading = "Smarty isn't ready yet";
+const String toyStartingMessage =
+    'Smarty is still starting up — tap Try again.';
 
 /// Heading when the toy is still linked to another account (HTTP 409).
 const String ownedElsewhereHeading =
@@ -65,6 +75,8 @@ extension RegistrationFailureMessage on RegistrationFailure {
       case RegistrationFailure.deviceUnreachable:
         return 'We lost touch with Smarty. Keep it close to your phone and '
             'try again.';
+      case RegistrationFailure.toyStarting:
+        return toyStartingMessage;
       case RegistrationFailure.unknown:
         return 'Something went wrong. Please try again.';
     }
@@ -112,9 +124,19 @@ class DeviceRegistrationService {
   final AuthService _authService = AuthService();
   final BleManager _bleManager = BleManager();
 
-  /// Read the toy's ID over BLE.
-  Future<String?> readDeviceId() async {
-    return await _bleManager.readDeviceId();
+  /// Read the toy's ID over BLE — re-read while it is still empty (the toy
+  /// is still starting up; see [BleManager.toyIdReadWaits]).
+  Future<ToyIdRead> readDeviceId() => _bleManager.readToyId();
+
+  /// What a finished id read ([read]) means for the link: null = go on with
+  /// its id; otherwise why it can't — [RegistrationFailure.toyStarting] when
+  /// the toy answered but its id was still empty, else
+  /// [RegistrationFailure.deviceUnreachable]. Pure.
+  static RegistrationFailure? failureForIdRead(ToyIdRead read) {
+    if (read.id != null) return null;
+    return read.stillStarting
+        ? RegistrationFailure.toyStarting
+        : RegistrationFailure.deviceUnreachable;
   }
 
   /// The request body for linking [deviceId]: `device_id`, plus `ble_name`

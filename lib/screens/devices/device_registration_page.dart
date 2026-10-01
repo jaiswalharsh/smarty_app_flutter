@@ -72,12 +72,17 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
     });
 
     try {
-      final deviceId = await _registrationService.readDeviceId();
+      // Re-read while the id is still empty: a toy that was just switched
+      // on (or reset) needs a moment before it has one.
+      final ToyIdRead read = await _registrationService.readDeviceId();
       if (!mounted) return;
-      if (deviceId == null || deviceId.isEmpty || deviceId == '{}') {
-        _fail(RegistrationFailure.deviceUnreachable);
+      final RegistrationFailure? idFailure =
+          DeviceRegistrationService.failureForIdRead(read);
+      if (idFailure != null) {
+        _fail(idFailure);
         return;
       }
+      final String deviceId = read.id!;
 
       // The name the toy shows over Bluetooth ("Smarty-B11E"), so the
       // account can recognise it later before connecting.
@@ -260,17 +265,28 @@ class _DeviceRegistrationPageState extends State<DeviceRegistrationPage> {
     }
 
     final bool owned = failure == RegistrationFailure.alreadyOwned;
+    // Not an error: the toy just needs a moment.
+    final bool starting = failure == RegistrationFailure.toyStarting;
     return [
       owned
           ? Icon(Icons.lock_outline, color: Colors.orange.shade400, size: 64)
-          : const Icon(Icons.error_outline, color: Colors.red, size: 64),
+          : starting
+              ? Icon(Icons.hourglass_top,
+                  color: Colors.orange.shade400, size: 64)
+              : const Icon(Icons.error_outline, color: Colors.red, size: 64),
       const SizedBox(height: 16),
       Text(
-        owned ? ownedElsewhereHeading : "Couldn't link Smarty",
+        owned
+            ? ownedElsewhereHeading
+            : starting
+                ? toyStartingHeading
+                : "Couldn't link Smarty",
         style: TextStyle(
           fontSize: 22,
           fontWeight: FontWeight.w600,
-          color: owned ? Colors.orange.shade800 : Colors.red.shade700,
+          color: owned || starting
+              ? Colors.orange.shade800
+              : Colors.red.shade700,
         ),
         textAlign: TextAlign.center,
       ),

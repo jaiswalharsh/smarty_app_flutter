@@ -367,6 +367,107 @@ void main() {
     });
   });
 
+  group('BleManager.isAccountToyConfirmed', () {
+    bool confirmed(bool? registered,
+            {bool linked = false, bool? accountHasToy}) =>
+        BleManager.isAccountToyConfirmed(
+          registered: registered,
+          linkedThisConnection: linked,
+          accountHasToy: accountHasToy,
+        );
+
+    test("linked, and the account's records list it → the account's own toy",
+        () {
+      expect(confirmed(true, accountHasToy: true), isTrue);
+    });
+
+    test("not until the account check says so (offline / not checked: can't "
+        'tell)', () {
+      expect(confirmed(true), isFalse);
+      expect(confirmed(true, accountHasToy: false), isFalse);
+    });
+
+    test('a toy that says it is not linked (reset, erased) never counts', () {
+      expect(confirmed(false, accountHasToy: true), isFalse);
+      expect(confirmed(null, accountHasToy: true), isFalse);
+    });
+
+    test('never a toy this app linked on this connection: what it holds '
+        "isn't the account's profile yet", () {
+      expect(confirmed(true, linked: true, accountHasToy: true), isFalse);
+      expect(confirmed(true, linked: true), isFalse);
+    });
+  });
+
+  group("reading the toy's own id (ab06)", () {
+    test('5 reads over ~3 s', () {
+      expect(BleManager.toyIdReadWaits, hasLength(5));
+      expect(BleManager.toyIdReadWaits.first, Duration.zero);
+      expect(
+        BleManager.toyIdReadWaits.fold<Duration>(
+            Duration.zero, (sum, w) => sum + w),
+        const Duration(seconds: 3),
+      );
+    });
+
+    Future<(ToyIdRead, int, List<Duration>)> readWith(
+        List<Object> answers) async {
+      int reads = 0;
+      final List<Duration> waited = [];
+      final ToyIdRead read = await BleManager.readToyIdWithRetries(
+        () async {
+          final Object a = answers[reads++];
+          if (a is Exception) throw a;
+          return a as String;
+        },
+        wait: (d) async => waited.add(d),
+      );
+      return (read, reads, waited);
+    }
+
+    test('an empty first read (toy still starting, or the stale value right '
+        'after it is set) is read again until the id arrives', () async {
+      final (read, reads, waited) = await readWith(['', '{}', '1cc3abc9b11c']);
+      expect(read.id, '1cc3abc9b11c');
+      expect(read.stillStarting, isFalse);
+      expect(reads, 3);
+      expect(waited, BleManager.toyIdReadWaits.sublist(1, 3));
+    });
+
+    test('still empty after every read → still starting up', () async {
+      final (read, reads, waited) =
+          await readWith(['', '', ' ', '{}', '']);
+      expect(read.id, isNull);
+      expect(read.stillStarting, isTrue);
+      expect(reads, 5);
+      expect(waited.fold<Duration>(Duration.zero, (sum, w) => sum + w),
+          const Duration(seconds: 3));
+    });
+
+    test('no read answered → not "starting": the toy is out of reach',
+        () async {
+      final e = Exception('link gone');
+      final (read, reads, _) = await readWith([e, e, e, e, e]);
+      expect(read.id, isNull);
+      expect(read.stillStarting, isFalse);
+      expect(reads, 5);
+    });
+
+    test('some reads fail, the others answer empty → still starting',
+        () async {
+      final e = Exception('busy');
+      final (read, _, _) = await readWith([e, '', e, e, '']);
+      expect(read.stillStarting, isTrue);
+    });
+
+    test('the first real id ends it', () async {
+      final (read, reads, waited) = await readWith(['1cc3abc9b11c']);
+      expect(read.id, '1cc3abc9b11c');
+      expect(reads, 1);
+      expect(waited, isEmpty);
+    });
+  });
+
   group('BleManager.shouldStartAccountCheck', () {
     bool should({
       bool linkingEnabled = true,

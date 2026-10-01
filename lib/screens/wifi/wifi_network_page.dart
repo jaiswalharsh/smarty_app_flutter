@@ -44,7 +44,11 @@ class LostTouchBanner extends StatelessWidget {
 }
 
 class WifiNetworkPage extends StatefulWidget {
-  const WifiNetworkPage({super.key});
+  const WifiNetworkPage({super.key, this.intro});
+
+  /// A line over everything else, saying why the list is open (e.g. the
+  /// setup page's "Smarty isn't on Wi-Fi yet. Pick your network.").
+  final String? intro;
 
   @override
   State<WifiNetworkPage> createState() => _WifiNetworkPageState();
@@ -478,6 +482,17 @@ class _WifiNetworkPageState extends State<WifiNetworkPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (widget.intro != null) ...[
+                Text(
+                  widget.intro!,
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+              ],
               if (!_linkUp) const LostTouchBanner(),
               _buildBanner(),
               if (_isScanningWifi)
